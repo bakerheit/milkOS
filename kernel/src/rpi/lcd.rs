@@ -4,8 +4,9 @@
 //! of both chips); this file wires them to SPI0 and the GPIO header, to the boot console and the
 //! crash screen, to the display layer and to the input layer.
 //!
-//! Off unless the command line says `milk.lcd=ili9486` (or `ili9488`, `st7796`, or `probe`: show each
-//! candidate set-up in turn, see [`probe`]): nothing on the header is touched otherwise. Options, all of them in cmdline.txt (docs/raspberry-pi.md):
+//! Off unless the command line says `milk.lcd=ili9486` (or another controller of `rpikit::lcd`, or
+//! `probe`: show each candidate set-up in turn, see [`probe`]): nothing on the header is touched
+//! otherwise. Options, all of them in cmdline.txt (docs/raspberry-pi.md):
 //!
 //! * `milk.lcd=` controller, `milk.lcd_rot=0|90|180|270` (default 90: landscape 480x320),
 //!   `milk.lcd_bgr=0|1` (default 1), `milk.lcd_inv=0|1`, `milk.lcd_madctl=0x..` (the raw memory
@@ -13,7 +14,8 @@
 //! * pins: `milk.lcd_dc=` (24), `milk.lcd_rst=` (25), `milk.lcd_bl=` (none: the backlight is
 //!   assumed wired on), `milk.touch_irq=` (17, `-1` to poll only), all GPIO numbers 2..=27; the
 //!   display is on chip select 0 and the touch chip on chip select 1;
-//! * `milk.lcd_hz=` (16000000, up to 32000000: the bit clock for the display);
+//! * `milk.lcd_hz=` (16000000, up to 32000000: the bit clock for the display), `milk.lcd_spi_mode=`
+//!   (0..3, default 0: the SPI clock polarity and phase);
 //! * `milk.touch=0|1`, `milk.touch_cal=a,b,c,d,e,f` (or `ask` for the four-cross helper);
 //! * `milk.lcd_view=fit|pan` (the desktop on the small screen: all of it scaled down, or 1:1
 //!   with the view following a finger held at the edge), `milk.hdmi=off` (do not use the
@@ -78,6 +80,8 @@ struct Settings {
     rst: u8,
     irq: Option<u8>,
     cdiv: u32,
+    /// SPI mode of the display (the touch chip is always mode 0).
+    mode: u8,
     touch_cdiv: u32,
     touch: bool,
     cal: Cal,
@@ -207,12 +211,20 @@ fn parse_settings(controller: Controller, core_hz: u32) -> Settings {
             c
         })
         .unwrap_or_else(|| Cal::default_for(cfg.rotation));
+    let mode = match option("lcd_spi_mode") {
+        None => 0,
+        Some(v) => pk::parse_spi_mode(v).unwrap_or_else(|| {
+            kprintln!("lcd: milk.lcd_spi_mode must be 0, 1, 2 or 3, using 0");
+            0
+        }),
+    };
     Settings {
         cfg,
         dc: pin("lcd_dc", 24),
         rst: pin("lcd_rst", 25),
         irq,
         cdiv: spi::divider_for(core_hz, hz),
+        mode,
         touch_cdiv: spi::divider_for(core_hz, 1_000_000),
         touch: flag("touch", true),
         cal,
@@ -254,12 +266,13 @@ struct HwBus {
     dc: u8,
     rst: u8,
     cdiv: u32,
+    mode: u8,
 }
 
 impl Bus for HwBus {
     fn write(&mut self, data: bool, bytes: &[u8]) -> bool {
         spi::write(self.dc, data);
-        spi::transfer(0, self.cdiv, bytes, None)
+        spi::transfer_mode(0, self.cdiv, self.mode, bytes, None)
     }
     fn reset_pin(&mut self, high: bool) {
         spi::write(self.rst, high);
@@ -285,6 +298,30 @@ impl touch::TouchBus for TouchHw {
 
 // ---- bring-up -----------------------------------------------------------------------------------
 
+/// The core clock SPI0 is divided from when the firmware does not say (its mailbox failed, or answered
+/// nonsense): the Pi 4's documented default `core_freq` of 500 MHz (the Pi 3 and older boards run
+/// 250..400 MHz; the Pi 4 clock follows its load between `core_freq_min` 200 and `core_freq` 500).
+/// The dividers are computed from the highest rate the clock reaches, so a clock that is really lower
+/// makes the bus slower than asked, never faster; with an overclocked `core_freq` (up to 550) it can be at most
+/// 10% faster. The wrong guess therefore costs speed, not correctness, and the transfer time-outs
+/// allow six times the time the wire needs.
+const FALLBACK_CORE_HZ: u32 = 500_000_000;
+
+/// The core clock for the dividers, and a few words on where it came from (for the log).
+fn core_clock() -> (u32, &'static str) {
+    // The divider comes from the highest rate the core clock reaches (it follows the load: a
+    // divider for the idle rate would make the bus faster than asked when the clock rises).
+    match mailbox::max_clock_rate(clock::CORE) {
+        Ok(hz) if hz >= 100_000_000 => (hz, "from the firmware"),
+        other => {
+            kprintln!(
+                "lcd: the firmware did not give the core clock ({other:?}), assuming the Pi 4's default 500 MHz"
+            );
+            (FALLBACK_CORE_HZ, "fallback, no firmware answer")
+        }
+    }
+}
+
 /// Set up SPI0, the pins and the panel if the command line asks for one. Call once after
 /// `mem::init` (the firmware mailbox needs memory) and before the display layer starts. Logs
 /// what it does; failure leaves the panel off and the boot going.
@@ -299,25 +336,15 @@ pub fn init() {
     let Some(controller) = Controller::parse(kind).or(probing.then_some(Controller::Ili9486)) else {
         STATE.store(FAILED, Ordering::Release);
         kprintln!(
-            "lcd: milk.lcd must be ili9486, ili9488 or st7796 (or probe, or off), no display driver"
+            "lcd: milk.lcd must be ili9486, ili9486p, ili9486p18, ili9488, st7796, ili9481, r61581, hx8357, ili9341 or st7789 (or probe, or off), no display driver"
         );
         return;
     };
-    // The divider comes from the highest rate the core clock reaches (it follows the load: a
-    // divider for the idle rate would make the bus faster than asked when the clock rises).
-    let core_hz = match mailbox::max_clock_rate(clock::CORE) {
-        Ok(hz) if hz >= 100_000_000 => hz,
-        other => {
-            kprintln!(
-                "lcd: the firmware did not give the core clock ({other:?}), assuming 500 MHz"
-            );
-            500_000_000
-        }
-    };
+    let (core_hz, core_src) = core_clock();
     spi::set_core_hz(core_hz);
     let s = parse_settings(controller, core_hz);
     if probing {
-        probe(&s, core_hz);
+        probe(&s, core_hz, core_src);
         return;
     }
     let touch_desc = match (s.touch, s.irq) {
@@ -326,7 +353,7 @@ pub fn init() {
         (true, None) => alloc::string::String::from("XPT2046 on CE1, polled"),
     };
     kprintln!(
-        "lcd: {} {}x{} rot {}{}, SPI0 CE0 {} kHz (core {} MHz / {}), DC=GPIO{} RST=GPIO{}, touch {}",
+        "lcd: {} {}x{} rot {}{}, SPI0 CE0 {} kHz (core {} MHz {} / {}, mode {}), DC=GPIO{} RST=GPIO{}, touch {}",
         controller.name(),
         s.cfg.width(),
         s.cfg.height(),
@@ -334,7 +361,9 @@ pub fn init() {
         if s.cfg.bgr { " bgr" } else { "" },
         core_hz / s.cdiv / 1000,
         core_hz / 1_000_000,
+        core_src,
         s.cdiv,
+        s.mode,
         s.dc,
         s.rst,
         touch_desc
@@ -347,6 +376,7 @@ pub fn init() {
         dc: s.dc,
         rst: s.rst,
         cdiv: s.cdiv,
+        mode: s.mode,
     };
     if !pk::init(&s.cfg, &mut bus) {
         STATE.store(FAILED, Ordering::Release);
@@ -391,82 +421,206 @@ fn connect(s: &Settings) -> bool {
     true
 }
 
-/// `milk.lcd=probe`, for a display whose controller is unknown (the kits cannot be read back): run through
-/// the candidate set-ups of `rpikit::lcdprobe`, each drawing a card (its name in big letters, the options
-/// that select it, colour bars, a border) for a few seconds, in two rotations; the whole list `ROUNDS`
-/// times (`milk.lcd_probe_rounds=`, default 2); then the boot goes on with no panel in use (the person
-/// puts the readable card's options in cmdline.txt). Pins, `milk.lcd_hz` and the backlight option are the
-/// ones of the normal driver; `milk.lcd_probe_ms=` is how long each card stays (default 2500).
-/// Bounded: every wait is, and a set-up whose transfers fail is skipped. About 80 s with the defaults.
-fn probe(base: &Settings, core_hz: u32) {
+/// Busy-wait until `ms` milliseconds have passed since `t0` (a [`now_us`] reading).
+fn wait_since(t0: u64, ms: u32) {
+    while now_us().saturating_sub(t0) < u64::from(ms) * 1000 {
+        core::hint::spin_loop();
+    }
+}
+
+/// Why a probe set-up was given up.
+#[derive(Clone, Copy)]
+enum Skip {
+    Init,
+    NumberCard,
+    Flash,
+    TextCard,
+}
+
+impl Skip {
+    fn name(self) -> &'static str {
+        match self {
+            Skip::Init => "reset and init",
+            Skip::NumberCard => "number card",
+            Skip::Flash => "colour flash",
+            Skip::TextCard => "text card",
+        }
+    }
+}
+
+/// `milk.lcd=probe`, for a display whose controller is unknown (the kits cannot be read back): run
+/// through the matrix of candidate set-ups of `rpikit::lcdprobe` (controller, SPI mode, clock, D/C and
+/// reset pins). Each set-up is reset and initialised again, then shows, in this order: its number
+/// (huge, white on black), four full-screen colour flashes (red, green, blue, white; a slow clock sends
+/// only the rows that fit in the time), and a text card (name, options, `SETUP n OF N`, bars). Then the
+/// next. The list is shown `milk.lcd_probe_rounds=` times (default 1); then the boot goes on with no
+/// panel in use (the person puts the options of the set-up they could see into cmdline.txt). The text
+/// card stays `milk.lcd_probe_ms=` ms (default 1000), the number card as long, a flash two fifths of it;
+/// `milk.lcd_probe_from=n` starts at set-up n; `milk.lcd_probe_pins=0` leaves out the backlight pins
+/// and the round of other D/C and reset pairs.
+///
+/// While probing, the GPIOs `lcdprobe::BACKLIGHT_PINS` (18 and 27) are driven high as a backlight switch,
+/// unless `milk.lcd_bl` names the pin or the pin is the set-up's D/C or reset (they are outputs into a
+/// 3.3 V logic input, nothing more); they stay high when the probe is over.
+///
+/// Every set-up logs a `lcd: probe n/N name ...` line when it starts (with the SPI mode, the divider and
+/// the clock it makes of the core clock, and where the core clock came from) and another when it ends
+/// (how long it took, how fast the text card went over the wire), so the SD-card log says exactly what
+/// ran. Bounded: every wait is, and a set-up whose transfers fail is skipped.
+fn probe(base: &Settings, core_hz: u32, core_src: &'static str) {
     use rpikit::lcdprobe as lp;
-    let rounds = option("lcd_probe_rounds")
+    let opts = lp::ProbeOptions::parse(option);
+    let count = opts.count();
+    let user_bl = option("lcd_bl")
         .and_then(cmdline::parse_num)
-        .map_or(lp::ROUNDS, |v| v.clamp(1, 10) as u32);
-    let hold = option("lcd_probe_ms")
-        .and_then(cmdline::parse_num)
-        .map_or(lp::HOLD_MS, |v| v.clamp(50, 20_000) as u32);
+        .and_then(spi::header_pin);
     kprintln!(
-        "lcd: probe: {} set-ups x {} rotations, {} ms each, {} round(s) (DC=GPIO{} RST=GPIO{}): look for a readable card",
-        lp::SETUPS.len(),
-        lp::ROTATIONS.len(),
-        hold,
-        rounds,
+        "lcd: probe: {} set-ups from {} of {}, {} round(s), text card {} ms, number card {} ms, colour flashes {} ms, pin sweeps {} (D/C GPIO{} reset GPIO{} unless a set-up names its own; SPI core clock {} MHz, {})",
+        count - opts.from + 1,
+        opts.from,
+        count,
+        opts.rounds,
+        opts.hold_ms,
+        lp::number_ms(opts.hold_ms),
+        lp::flash_ms(opts.hold_ms),
+        if opts.pins { "on" } else { "off" },
         base.dc,
-        base.rst
+        base.rst,
+        core_hz / 1_000_000,
+        core_src
     );
-    if !connect(base) {
+    spi::connect_pins();
+    if let Some(p) = base.irq {
+        spi::set_function(p, spi::Func::Input);
+        spi::set_pull(p, spi::Pull::Up);
+    }
+    if !spi::present() {
+        kprintln!("lcd: SPI0 does not answer (no such controller here?): no display on the header");
         return;
     }
-    let default_hz = base.cdiv;
-    for round in 1..=rounds {
-        for (i, setup) in lp::SETUPS.iter().enumerate() {
-            let cdiv = if setup.hz == 0 {
-                default_hz
-            } else {
-                spi::divider_for(core_hz, setup.hz)
-            };
-            let mut bus = HwBus {
-                dc: base.dc,
-                rst: base.rst,
-                cdiv,
-            };
-            let mut cfg = setup.config(lp::ROTATIONS[0]);
-            spi::reset();
-            if !pk::init(&cfg, &mut bus) {
-                kprintln!("lcd: probe: set-up {} ({}): SPI transfers timed out, skipped", i + 1, lp::label(setup).as_str());
-                continue;
+    spi::reset();
+    if let Some(bl) = user_bl {
+        spi::set_function(bl, spi::Func::Output);
+        spi::write(bl, true);
+    }
+    let base_pins = (base.dc, base.rst);
+    let mut prev: Option<(u8, u8)> = None;
+    let t_all = now_us();
+    let (mut shown, mut skipped) = (0u32, 0u32);
+    for round in 1..=opts.rounds {
+        for i in opts.from - 1..count {
+            let setup = &lp::SETUPS[i];
+            let n = i + 1;
+            let t_setup = now_us();
+            let (dc, rst) = setup.pins_or(base_pins);
+            let cdiv = spi::divider_for(core_hz, setup.hz);
+            let desc = lp::describe(setup, base_pins);
+            // The pins: the previous set-up's D/C and reset go back to inputs, this one's become outputs
+            // (D/C low, reset high), and the backlight pins that are free are driven high.
+            if let Some((pd, pr)) = prev
+                && (pd, pr) != (dc, rst)
+            {
+                for p in [pd, pr] {
+                    if p != dc && p != rst {
+                        spi::set_function(p, spi::Func::Input);
+                    }
+                }
             }
-            for (k, rot) in lp::ROTATIONS.iter().enumerate() {
-                cfg.rotation = *rot;
-                // The second rotation is only a new memory access control byte, no new init.
-                if k > 0 && !pk::command(&cfg, &mut bus, pk::MADCTL, &[cfg.madctl()]) {
-                    break;
+            prev = Some((dc, rst));
+            spi::set_function(dc, spi::Func::Output);
+            spi::set_function(rst, spi::Func::Output);
+            spi::write(rst, true);
+            spi::write(dc, false);
+            let mut bl_text = alloc::string::String::new();
+            if opts.pins && user_bl.is_none() {
+                for bl in lp::BACKLIGHT_PINS {
+                    if bl != dc && bl != rst && Some(bl) != base.irq {
+                        spi::set_function(bl, spi::Func::Output);
+                        spi::write(bl, true);
+                        let _ = core::fmt::Write::write_fmt(&mut bl_text, format_args!(" GPIO{bl}"));
+                    }
                 }
-                let (a, b) = lp::options(setup, *rot);
-                kprintln!(
-                    "lcd: probe {round}/{rounds}: set-up {} of {}: {} -> {} {} ({} kHz)",
-                    i + 1,
-                    lp::SETUPS.len(),
-                    lp::label(setup).as_str(),
-                    a.as_str(),
-                    b.as_str(),
-                    core_hz / cdiv / 1000
-                );
-                let mut card = lp::ProbeCard::new(i + 1, lp::SETUPS.len(), setup, *rot, cfg.width(), cfg.height());
-                let full = Rect::new(0, 0, cfg.width(), cfg.height());
-                if !pk::draw_rect(&cfg, &mut bus, full, &mut card) {
-                    kprintln!("lcd: probe: SPI transfers timed out while drawing, skipped");
-                    break;
+            }
+            kprintln!(
+                "lcd: probe {n}/{count} {}: start (round {round}/{}): {}; SPI mode {} divider {cdiv} = {} kHz of core {} MHz ({core_src}); backlight high:{}",
+                desc.as_str(),
+                opts.rounds,
+                lp::options(setup, base_pins).as_str(),
+                setup.mode,
+                core_hz / cdiv / 1000,
+                core_hz / 1_000_000,
+                if bl_text.is_empty() { " none by the probe" } else { bl_text.as_str() }
+            );
+            let mut bus = HwBus {
+                dc,
+                rst,
+                cdiv,
+                mode: setup.mode,
+            };
+            let cfg = setup.config();
+            let (w, h) = (cfg.width(), cfg.height());
+            spi::reset();
+            let mut text_ms = 0u64;
+            let result = (|| {
+                if !pk::init(&cfg, &mut bus) {
+                    return Err(Skip::Init);
                 }
-                let t = Timeout::ms(u64::from(hold));
-                while !t.expired() {
-                    core::hint::spin_loop();
+                // 1. The number card (rows from the top while the time lasts).
+                let t = now_us();
+                let budget = lp::number_ms(opts.hold_ms);
+                let mut card = lp::NumberCard::new(n, count, setup, w, h);
+                let mut stop = || now_us().saturating_sub(t) >= u64::from(budget) * 1000;
+                if lp::draw_banded(&cfg, &mut bus, &mut card, &mut stop).is_none() {
+                    return Err(Skip::NumberCard);
+                }
+                wait_since(t, budget);
+                // 2. The colour flashes.
+                let budget = lp::flash_ms(opts.hold_ms);
+                for c in lp::FLASHES {
+                    let t = now_us();
+                    let mut stop = || now_us().saturating_sub(t) >= u64::from(budget) * 1000;
+                    if lp::draw_banded(&cfg, &mut bus, &mut pk::Solid(c), &mut stop).is_none() {
+                        return Err(Skip::Flash);
+                    }
+                    wait_since(t, budget);
+                }
+                // 3. The text card, all of it, then held.
+                let mut card = lp::ProbeCard::new(n, count, setup, base_pins, w, h);
+                let t = now_us();
+                if !pk::draw_rect(&cfg, &mut bus, Rect::new(0, 0, w, h), &mut card) {
+                    return Err(Skip::TextCard);
+                }
+                text_ms = (now_us() - t) / 1000;
+                wait_since(now_us(), opts.hold_ms);
+                Ok(())
+            })();
+            let took = (now_us() - t_setup) / 1000;
+            match result {
+                Ok(()) => {
+                    shown += 1;
+                    let bytes = (w * h * cfg.controller.bytes_per_pixel()) as u64;
+                    kprintln!(
+                        "lcd: probe {n}/{count} {}: done in {took} ms (text card {bytes} bytes in {text_ms} ms = {} kbit/s measured, {} kbit/s from the divider)",
+                        desc.as_str(),
+                        bytes * 8 / text_ms.max(1),
+                        core_hz / cdiv / 1000
+                    );
+                }
+                Err(at) => {
+                    skipped += 1;
+                    kprintln!(
+                        "lcd: probe {n}/{count} {}: skipped after {took} ms, the SPI transfers failed at the {}",
+                        desc.as_str(),
+                        at.name()
+                    );
                 }
             }
         }
     }
-    kprintln!("lcd: probe finished: no display driver is running; put the options of the card you could read in cmdline.txt");
+    kprintln!(
+        "lcd: probe finished in {} ms: {shown} set-up(s) shown, {skipped} skipped; no display driver is running; put the options of the set-up you could see into cmdline.txt in place of milk.lcd=probe",
+        (now_us() - t_all) / 1000
+    );
 }
 
 /// The panel was brought up and is in use.
@@ -627,6 +781,7 @@ fn send(s: &Settings, rects: &[Rect], view: View) -> bool {
         dc: s.dc,
         rst: s.rst,
         cdiv: s.cdiv,
+        mode: s.mode,
     };
     let (w, h) = (s.cfg.width(), s.cfg.height());
     if MODE.load(Ordering::Relaxed) == TEXT {
@@ -722,6 +877,7 @@ pub fn crash_paint(f: impl FnOnce(&mut Console)) -> bool {
         dc: s.dc,
         rst: s.rst,
         cdiv: s.cdiv,
+        mode: s.mode,
     };
     let (w, h) = (s.cfg.width(), s.cfg.height());
     // SAFETY: the static shadow just drawn on.

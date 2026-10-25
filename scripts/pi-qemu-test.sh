@@ -25,7 +25,7 @@
 #   boots 8 to 12: the 3.5-inch SPI display (`milk.lcd=...`), against qemu's SPI0 controller with nothing wired to it:
 #           8: panel mirroring an HDMI desktop; 9: the panel as the only screen (`milk.hdmi=off`, 1:1 pan view,
 #           other controller / rotation / pins / polled touch); 10: a crash with the panel on (no stall, HDMI crash
-#           screen as before); 11: bad option values are refused and the defaults used; 12: an unknown controller; 14: `milk.lcd=probe` (every candidate set-up draws its card, then the boot goes on).
+#           screen as before); 11: bad option values are refused and the defaults used; 12: an unknown controller; 14, 15: `milk.lcd=probe` (every candidate set-up shows its number card, colour flashes and text card, then the boot goes on; 15: its own options).
 #           What qemu cannot show: whether any pixel reaches a glass (the host tests of rpikit's panel model prove the
 #           byte stream; the real board is the test of the wiring).
 # Offline, private images in a fresh /tmp folder, the qemu started here killed by PID.
@@ -313,26 +313,47 @@ check '^lcd: milk.touch_cal needs six numbers' "boot 11: a bad calibration is re
 check 'DC=GPIO24 ' "boot 11: the default pin was used"
 check 'wm: desktop up' "boot 11: the desktop comes up anyway"
 
-python3 scripts/pi_dtb.py "$T/lcd.dtb" --cmdline "milk.lcd=st7789"
+python3 scripts/pi_dtb.py "$T/lcd.dtb" --cmdline "milk.lcd=ili9999"
 boot 12 "wait@300:wm: desktop up"
 stop
-check '^lcd: milk.lcd must be ili9486, ili9488 or st7796' "boot 12: an unknown controller is refused"
+check '^lcd: milk.lcd must be ili9486, ili9486p, ili9486p18, ili9488, st7796, ili9481, r61581, hx8357, ili9341 or st7789' "boot 12: an unknown controller is refused"
 has '^lcd: panel initialised' && bad "boot 12: a panel was brought up" || ok "boot 12: no panel"
 check 'wm: desktop up' "boot 12: the desktop comes up anyway"
 
-# ---- boot 14: milk.lcd=probe, for a display whose controller is unknown: every set-up shows its card, then the boot goes on ----
-python3 scripts/pi_dtb.py "$T/lcd.dtb" --cmdline "milk.lcd=probe milk.lcd_probe_rounds=1 milk.lcd_probe_ms=150"
+# ---- boot 14: milk.lcd=probe, for a display whose controller is unknown: every set-up shows its number card, four colour
+# flashes and its text card, then the boot goes on. The holds are trimmed to 50 ms (the init waits of 21 set-ups remain). ----
+python3 scripts/pi_dtb.py "$T/lcd.dtb" --cmdline "milk.lcd=probe milk.lcd_probe_rounds=1 milk.lcd_probe_ms=50"
 boot 14 "wait@600:wm: desktop up"
 stop
-check '^lcd: probe: 6 set-ups x 2 rotations, 150 ms each, 1 round\(s\)' "boot 14: probe mode starts"
-N=$(tr -d '\r' < "$LOG" | grep -Eac '^lcd: probe 1/1: set-up [1-6] of 6: ')
-[ "$N" = 12 ] && ok "boot 14: all 6 set-ups x 2 rotations drew their card ($N lines)" || bad "boot 14: $N probe cards, expected 12"
-check '^lcd: probe 1/1: set-up 1 of 6: ILI9486 -> milk.lcd=ili9486 milk.lcd_rot=90 \(' "boot 14: the first card names its set-up and options"
-check '^lcd: probe 1/1: set-up 6 of 6: ST7796 SLOW -> milk.lcd=st7796 milk.lcd_rot=270 milk.lcd_hz=4000000 ' "boot 14: the last card (slow clock, rotation 270)"
-check '^lcd: probe finished' "boot 14: probe ends"
+check '^lcd: probe: 21 set-ups from 1 of 21, 1 round\(s\), text card 50 ms, number card 50 ms, colour flashes 20 ms, pin sweeps on \(D/C GPIO24 reset GPIO25 .*SPI core clock [0-9]+ MHz, (from the firmware|fallback, no firmware answer)\)' "boot 14: probe mode starts, says the clock and where it came from"
+N=$(tr -d '\r' < "$LOG" | grep -Eac '^lcd: probe [0-9]+/21 [a-z0-9]+ [0-9]+ MHz mode [03] DC[0-9]+ RST[0-9]+: start ')
+[ "$N" = 21 ] && ok "boot 14: all 21 set-ups started ($N lines)" || bad "boot 14: $N set-up start lines, expected 21"
+N=$(tr -d '\r' < "$LOG" | grep -Eac '^lcd: probe [0-9]+/21 [a-z0-9]+ [0-9]+ MHz mode [03] DC[0-9]+ RST[0-9]+: done in [0-9]+ ms \(text card [0-9]+ bytes in [0-9]+ ms')
+[ "$N" = 21 ] && ok "boot 14: all 21 set-ups ran through (init, number card, flashes, text card: $N done lines)" || bad "boot 14: $N done lines, expected 21"
+check '^lcd: probe 1/21 ili9486 4 MHz mode 0 DC24 RST25: start \(round 1/1\): milk.lcd=ili9486 milk.lcd_hz=4000000; SPI mode 0 divider [0-9]+ = [0-9]+ kHz of core [0-9]+ MHz \(' "boot 14: the first set-up, with its divider and clock"
+check '^lcd: probe 10/21 st7789 4 MHz mode 0 DC24 RST25: start ' "boot 14: the tenth: the last controller at the slow clock"
+check '^lcd: probe 14/21 ili9486 32 MHz mode 0 ' "boot 14: a 32 MHz set-up"
+check '^lcd: probe 15/21 ili9486 4 MHz mode 3 DC24 RST25: start .*milk.lcd_spi_mode=3' "boot 14: an SPI mode 3 set-up"
+check '^lcd: probe 18/21 ili9486 4 MHz mode 0 DC22 RST27: start .*milk.lcd_dc=22 milk.lcd_rst=27;.*backlight high: GPIO18$' "boot 14: other pins (27 is the reset, so only 18 is the backlight)"
+check '^lcd: probe 21/21 ili9486p 4 MHz mode 0 DC25 RST24: start .*milk.lcd_dc=25 milk.lcd_rst=24' "boot 14: the last set-up"
+check '^lcd: probe 1/21 .*backlight high: GPIO18 GPIO27$' "boot 14: the free backlight pins are driven high"
+check '^lcd: probe finished in [0-9]+ ms: 21 set-up\(s\) shown, 0 skipped' "boot 14: probe ends, nothing skipped"
+has 'lcd: probe [0-9]+/21 .*: skipped after|lcd: .*timed out' && bad "boot 14: a set-up was skipped or timed out" || ok "boot 14: nothing skipped, no SPI time-out"
 has '^lcd: panel initialised' && bad "boot 14: a panel was left running" || ok "boot 14: no panel after the probe"
 has 'KERNEL PANIC|kernel panic' && bad "boot 14: a kernel panic" || ok "boot 14: no panic"
 check 'wm: desktop up' "boot 14: the boot goes on after the probe"
+
+# ---- boot 15: the probe's own options: start at set-up 15, the pin sweeps off (no pin round, no backlight pins), three rounds' worth of nothing else ----
+python3 scripts/pi_dtb.py "$T/lcd.dtb" --cmdline "milk.lcd=probe milk.lcd_probe_ms=50 milk.lcd_probe_from=15 milk.lcd_probe_pins=0 milk.lcd_spi_mode=7"
+boot 15 "wait@300:wm: desktop up"
+stop
+check '^lcd: probe: 3 set-ups from 15 of 17, 1 round\(s\), .*pin sweeps off ' "boot 15: from=15 with the pin round left out leaves three set-ups"
+check '^lcd: milk.lcd_spi_mode must be 0, 1, 2 or 3, using 0' "boot 15: a bad SPI mode is refused"
+N=$(tr -d '\r' < "$LOG" | grep -Eac '^lcd: probe [0-9]+/17 .*: start ')
+[ "$N" = 3 ] && ok "boot 15: three set-ups ran" || bad "boot 15: $N set-ups ran, expected 3"
+check '^lcd: probe 15/17 ili9486 4 MHz mode 3 DC24 RST25: start .*backlight high: none by the probe' "boot 15: with the sweeps off the probe drives no backlight pin"
+check '^lcd: probe finished in [0-9]+ ms: 3 set-up\(s\) shown, 0 skipped' "boot 15: probe ends"
+check 'wm: desktop up' "boot 15: the boot goes on after the probe"
 
 # ---- boot 13 (only if MILK_REAL_DTB names a device tree from a real board's boot partition: it is not in the repository) ----
 if [ -n "${MILK_REAL_DTB:-}" ] && [ -r "$MILK_REAL_DTB" ]; then

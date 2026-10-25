@@ -74,7 +74,7 @@ them, so every existing option works unchanged:
 | `milk.disable=pcie,usb,genet,sdhci,rng` | start without a driver that misbehaves on a real board (edit `cmdline.txt`, no rebuild): `pcie` (and with it USB), `usb`, `genet`, `sdhci`, `rng` |
 | `milk.fbscale=N` | magnify the boot log and crash screen font N times (default 1; 2 from 1600 px wide) |
 | `milk.ledcodes=0` | no ACT LED progress codes (the LED just turns on at the start of `kmain`; the `led: stage` log lines stay). Default on; the codes add about 9 s to a boot |
-| `milk.lcd=ili9486` / `ili9488` / `st7796` | the 3.5-inch SPI display on the GPIO header (off without it; many more options: "3.5-inch SPI display") |
+| `milk.lcd=ili9486` (or `ili9486p`, `ili9486p18`, `ili9488`, `st7796`, `ili9481`, `r61581`, `hx8357`, `ili9341`, `st7789`) | the 3.5-inch SPI display on the GPIO header (off without it; many more options: "3.5-inch SPI display"); `milk.lcd=probe` tries them all |
 | `milk.crashtest=early` / `late` | panic on purpose right after the display is up / once the desktop has been up 8 s (tests the crash screens); `late-off` / `late-reset`: the desktop's Shut Down / Restart after 5 s (tests the power paths) |
 
 ## Putting it on a card
@@ -338,14 +338,15 @@ a display, the touch thread), `rpikit/src/{lcd,touch}.rs` (everything that can b
 
 | option | default | does |
 |---|---|---|
-| `milk.lcd=` | off | `ili9486` (the Waveshare-35A style kit: 16-bit words through shift registers), `ili9488` (18-bit pixels over plain SPI), `st7796` (RGB565 over plain SPI); `off` |
+| `milk.lcd=` | off | the controller: `ili9486` (the Waveshare-35A style kit: 16-bit words through shift registers), `ili9486p` (the same chip on plain 8-bit SPI, RGB565) and `ili9486p18` (plain, 18-bit pixels: the "35B/35C" and MPI3501 style), `ili9488` (plain, 18-bit pixels), `st7796`, `ili9481`, `r61581`, `hx8357` (plain, RGB565), `ili9341` and `st7789` (plain, RGB565, but their memory is 240x320: the picture is 320x240 landscape); `off` |
 | `milk.lcd=probe` | | for a kit whose controller nobody knows: shows each candidate set-up in turn, see "Finding the controller" below |
-| `milk.lcd_probe_rounds=` `milk.lcd_probe_ms=` | 2, 2500 | probe mode: how many times the list is shown, and how long each card stays (ms) |
+| `milk.lcd_probe_ms=` `milk.lcd_probe_rounds=` `milk.lcd_probe_from=` `milk.lcd_probe_pins=` | 1000, 1, 1, 1 | probe mode: how long the text card stays (ms; the number card stays as long, a colour flash two fifths of it), how many times the list is shown, the set-up to start at, and `0` to leave out the pin sweeps |
+| `milk.lcd_spi_mode=` | `0` | the SPI clock polarity and phase, `0`..`3` (a few kits want `3`) |
 | `milk.lcd_rot=` | `90` | `0` portrait 320x480, `90` landscape 480x320 (the kit's usual use), `180`, `270` |
 | `milk.lcd_bgr=` | `1` | the glass's colour order (red and blue swapped on screen: try `0`) |
 | `milk.lcd_inv=` | per controller | display inversion (colours inverted: try the other value; `st7796` modules usually need `1`) |
 | `milk.lcd_madctl=` | from rot/bgr | the raw memory-access byte (`0x28`...), for a glass that comes out mirrored |
-| `milk.lcd_hz=` | `16000000` | SPI bit clock, up to `32000000` (divided down from the *highest* core clock the firmware reports, never faster than asked) |
+| `milk.lcd_hz=` | `16000000` | SPI bit clock, up to `32000000` (divided down from the *highest* core clock the firmware reports, never faster than asked; if the firmware's mailbox does not answer, from 500 MHz, the Pi 4's default `core_freq`: a core clock that is really lower makes the bus slower, never faster; the boot log says which: `lcd: ... (core 500 MHz fallback, no firmware answer / 32, mode 0)`) |
 | `milk.lcd_dc=` `milk.lcd_rst=` `milk.lcd_bl=` `milk.touch_irq=` | 24, 25, none, 17 | pins, GPIO 2..27 |
 | `milk.touch=0` | on | leave the touch chip alone |
 | `milk.touch_cal=a,b,c,d,e,f` | from `lcd_rot` | calibration: `x = ((a*rx + b*ry) >> 16) + c`, `y = ((d*rx + e*ry) >> 16) + f` from the chip's raw 0..4095 readings (16.16 fixed point, offsets in pixels); `ask` runs the four-cross helper |
@@ -353,20 +354,66 @@ a display, the touch thread), `rpikit/src/{lcd,touch}.rs` (everything that can b
 | `milk.hdmi=off` | auto | do not use the firmware's HDMI framebuffer: the desktop draws in RAM and the panel is the screen |
 
 **Finding the controller (`milk.lcd=probe`).** These kits are write-only over SPI: nothing can be read back, so the kernel cannot
-tell which chip is on the glass. If you do not know (or `milk.lcd=ili9486` only makes the screen flicker blue or stay white), put
-`milk.lcd=probe` in `cmdline.txt` instead and boot. Before anything else the kernel runs through six candidate set-ups, one after another,
-and **draws a full-screen card on each**: the set-up's name in big letters (`ILI9486`, `ILI9488`, `ST7796`, and the same three with
-`SLOW`, which use a 4 MHz clock for wiring that cannot keep up with 16), under it the options that select it
-(`milk.lcd=ili9488` / `milk.lcd_rot=90`, shown in capitals: type them in lower case), `SETUP n OF 6`, then the **colour bars** red, green,
-blue, white, black, and a white border. Each set-up is shown for about 6 s in two landscape rotations (90, then 270), and the list is shown twice
-(about 80 s in all; `milk.lcd_probe_rounds=` and `milk.lcd_probe_ms=` change that). Watch the screen: **the set-up whose card you can read is the one
-to use.** Put its options in `cmdline.txt` in place of `milk.lcd=probe`. Then, from the bars: red, green, blue in the wrong order (blue first):
-add `milk.lcd_bgr=0`; white looks black and black looks white: add `milk.lcd_inv=1` (or `0` if it is set); the text upside down or mirrored: the other rotation
-(`milk.lcd_rot=270`, or `180`, `0`). If **no card is ever readable**, the pins or the wiring are the next suspects (`milk.lcd_dc=`, `milk.lcd_rst=`; the
-log, on the ACT LED stages, still says the boot went on). The probe uses the pins and `milk.lcd_hz` of the normal driver (the slow set-ups force 4 MHz); a set-up
-whose transfers time out is skipped. When the list is done the boot goes on **with no panel in use** (the kernel logs `lcd: probe finished`), because
-nothing says which set-up was the right one. Controllers it does not try: ILI9341/ILI9343 (their memory is 240x320, a different size from this driver's
-480x320), ILI9481 and others; the label on the glass's edge ("9343-c2" and the like) is the glass or batch, often not the controller.
+tell which chip is on the glass, how it is wired, or on which pins. If you do not know (or `milk.lcd=ili9486` only makes the screen
+flicker blue or stay white), put `milk.lcd=probe` in `cmdline.txt` instead and boot. The kernel then goes through **21 set-ups, one after
+another** (about 95 s in all, then the boot goes on with no panel in use; the log says `lcd: probe finished`). Every set-up is reset and
+initialised afresh and shows, in this order:
+
+1. **The number card** (1 s): the set-up's number, huge, white on black, with `OF 21` and the controller's name under it.
+2. **Four colour flashes** (0.4 s each): the whole screen solid red, then green, blue, white.
+3. **The text card** (1 s, plus the time to send it): the controller's name in big letters, the options that select the set-up (in
+   capitals: type them in lower case), `SETUP n OF 21`, the clock, SPI mode and pins, then colour bars and a white border. It fills the
+   whole addressed area, so whichever way the glass is mounted something shows; every set-up is landscape (rotation 90).
+
+The number card of set-up 14 and the text card of set-up 1, drawn through the panel model (`scripts/lcd-shots.sh`):
+![number card](screenshots/raspberry-pi-lcd-probe-number.png) ![text card](screenshots/raspberry-pi-lcd-probe-card.png)
+
+**What to look for, and what to tell us.** If you see *anything* change on the screen, even only a colour flash, note **the number of
+the set-up** (the number card is the best: a big white number; if you only caught flashes, count them: four flashes per set-up and a
+short gap while the next is reset, about 4-5 s per set-up; the numbers below are in order) and tell us: the **number** (or the text card's words), what you saw (a number, flashes of
+which colours, a readable card, half a picture, mirrored or upside-down text, wrong colours) and in which part of the cycle. A **blue
+or white screen that never changes** means no set-up got through; then tell us that, and read the log (below). If a text card is readable, take
+the options on it (`milk.lcd=ili9488 milk.lcd_hz=4000000 ...`) and put them in `cmdline.txt` in place of `milk.lcd=probe`. Then, from the bars or flashes: red,
+green, blue in the wrong order (blue first): add `milk.lcd_bgr=0`; white looks black and black looks white: add `milk.lcd_inv=1` (or `0`
+if it is set); text upside down or mirrored: `milk.lcd_rot=270` (or `180`, `0`); a clock that works at 4 MHz is raised by trying `milk.lcd_hz=` 8000000,
+16000000. A 240x320 controller (`ili9341`, `st7789`) draws into 320x240, so even a normal 480x320 glass shows only a corner with it: a partial picture
+is already the answer (it means the controller works, and the glass is probably the other kind).
+
+**The set-ups, in order** (D/C GPIO 24, reset GPIO 25 unless said; every set-up has its own `milk.lcd=` name, so a person can type it):
+
+| n | set-up | n | set-up |
+|---|---|---|---|
+| 1 | `ili9486` 4 MHz mode 0 | 12 | `ili9486p` 16 MHz |
+| 2 | `ili9486p` 4 MHz | 13 | `ili9341` 16 MHz |
+| 3 | `ili9486p18` 4 MHz | 14 | `ili9486` 32 MHz |
+| 4 | `ili9488` 4 MHz | 15 | `ili9486` 4 MHz **mode 3** |
+| 5 | `st7796` 4 MHz | 16 | `ili9486p` 4 MHz mode 3 |
+| 6 | `ili9481` 4 MHz | 17 | `ili9341` 4 MHz mode 3 |
+| 7 | `r61581` 4 MHz | 18 | `ili9486` 4 MHz, **D/C 22 reset 27** |
+| 8 | `hx8357` 4 MHz | 19 | `ili9486` 4 MHz, D/C 25 reset 24 |
+| 9 | `ili9341` 4 MHz | 20 | `ili9486p` 4 MHz, D/C 22 reset 27 |
+| 10 | `st7789` 4 MHz | 21 | `ili9486p` 4 MHz, D/C 25 reset 24 |
+| 11 | `ili9486` 16 MHz | | |
+
+(Slow clocks first for every controller; the faster ones only for the three likeliest; SPI mode 3 for those three; the other D/C and reset pairs, as a
+second round, for the two likeliest controllers. Slow set-ups at 4 MHz cannot send a full screen in 0.4 s (0.6 s for 565, 0.9 s for 18-bit), so a
+colour flash covers the rows that fit, from the top, and the cards take longer to appear. `ili9341` and `st7789` use their own 320x240 area.) Why these: the
+first version of the probe (ILI9486, ILI9488 and ST7796, each at 4 and 16 MHz, SPI mode 0, GPIO 24/25) already showed nothing on one real kit, so the new matrix adds the same chips with plain SPI framing (the
+other common wiring), the other controllers cheap 3.5-inch kits come with, SPI mode 3, and the other pin pairs 3.5-inch Raspberry Pi kits are known to use.
+
+**Pins the probe drives.** D/C and reset (GPIO 24 and 25, or `milk.lcd_dc` / `milk.lcd_rst`, or the pair of the set-up in the second round: 22/27, 25/24;
+the previous set-up's pair goes back to inputs); SPI0 (GPIO 7-11, ALT0); the touch pen-down line `milk.touch_irq` (GPIO 17) as an input with pull-up; and, as a
+backlight switch, **GPIO 18 and GPIO 27 high** (a kit whose backlight transistor hangs on one of them lights up; they are only outputs into a 3.3 V logic input).
+Not 18 or 27 if a set-up uses it as D/C or reset, and not at all if `milk.lcd_bl=<gpio>` names the backlight pin (that one is driven high instead). They stay high when the probe is
+over. **`milk.lcd_probe_pins=0` turns the pin sweeps off**: no backlight pins driven, and the second round (set-ups 18-21) is left out, 17 set-ups remain.
+`milk.lcd_probe_from=n` starts at set-up n (to run again just the tail); `milk.lcd_probe_ms=` changes how long a card stays; `milk.lcd_probe_rounds=2` shows the list twice.
+
+**The log.** Each set-up prints `lcd: probe n/21 NAME CLOCK MODE PINS: start (round r/R): <options>; SPI mode m divider d = k kHz of core C MHz (<where the core clock came from>); backlight high: ...`
+when it starts and `lcd: probe n/21 NAME ...: done in T ms (text card B bytes in M ms = K kbit/s measured, D kbit/s from the divider)` when it ends (or `skipped after T
+ms, the SPI transfers failed at the <step>`), and `lcd: probe finished in T ms: N set-up(s) shown, S skipped` at the end. The first line says whether the core clock
+came from the firmware or is the 500 MHz fallback (the mailbox did not answer), and the measured kbit/s next to the divider's tells you whether the clock the bus really
+got is lower (a measured rate far below the divider's: the core clock is idling at its low rate, or the CPU is the bottleneck; the picture is only slower then). With a
+boot log file on the SD card, these lines are in it.
 
 **What it shows**
 
@@ -406,10 +453,10 @@ the pixel data is plain bytes: `rpikit::lcd` does that framing, the model in the
 
 **What is verified, and how**
 
-* Host tests (`scripts/rpikit-test.sh`, 35 new tests in `rpikit/src/lcdtests.rs`): the driver runs byte for byte against a model
-  of the three controllers (graphics memory, address window, MADCTL mirroring, colour format, 16-bit framing, what a viewer
+* Host tests (`scripts/rpikit-test.sh`, the tests in `rpikit/src/lcdtests.rs`): the driver runs byte for byte against a model
+  of the ten controllers (graphics memory, address window, MADCTL mirroring, colour format, 16-bit framing, what a viewer
   sees) and of the touch chip. They check the init streams, the window and pixel bytes, RGB565 and 18-bit packing, all four rotations
-  upright on all three controllers, partial updates sending only their rectangle, failures at every point of the bring-up,
+  upright on all ten controllers, partial updates sending only their rectangle, failures at every point of the bring-up,
   dirty-rectangle merging, the desktop's scaling (against a floating-point reference) and panning, the touch command bytes and
   decoding, the filter, calibration defaults, the least-squares fit, the pointer state machine, and hostile input.
   Pictures drawn through the model: ![boot log](screenshots/raspberry-pi-lcd-boot-log.png)
@@ -417,9 +464,9 @@ the pixel data is plain bytes: `rpikit::lcd` does that framing, the model in the
   ![desktop, scaled](screenshots/raspberry-pi-lcd-desktop.png) ![desktop, 1:1 panned](screenshots/raspberry-pi-lcd-desktop-pan.png)
   (`scripts/lcd-shots.sh` regenerates them; the boot log and crash text are drawn by the test with the kernel's
   font data, the desktop is the qemu screenshot above through the real scaler and panel driver).
-* qemu (`scripts/pi-qemu-test.sh`, boots 8 to 12): qemu's raspi4b has an SPI0 controller and nothing attached to it, so the
+* qemu (`scripts/pi-qemu-test.sh`, boots 8 to 12, 14 and 15): qemu's raspi4b has an SPI0 controller and nothing attached to it, so the
   *kernel's* whole driver runs: probe, pins, bring-up, the boot log, the desktop on the panel (mirrored, and as the only screen with
-  `milk.hdmi=off` and `pan`), touch polling, a crash with the panel on, bad option values and an unknown controller. It proves the
+  `milk.hdmi=off` and `pan`), touch polling, a crash with the panel on, bad option values, an unknown controller, and the whole probe cycle (every set-up resets, initialises and draws its three signs, with the holds cut to 50 ms; its own options). It proves the
   boot never stalls or panics with a panel absent, silent or wrong; it **cannot** show a single pixel on a glass.
 * **Untested until a real panel**: the init values (power, VCOM, gamma: a washed-out or dark picture is these), the MADCTL values and
   the glass's mounting (a mirrored picture: `milk.lcd_rot=`, `milk.lcd_madctl=`), the colour order and inversion, whether the clock
@@ -429,7 +476,7 @@ the pixel data is plain bytes: `rpikit::lcd` does that framing, the model in the
 
 **On the real board, in this order**: (1) the ACT LED (on while the kernel runs); (2) the panel: the boot log should appear a
 second or two after power-on (a blank white or black panel with the backlight lit means it is not initialised: check the
-wiring, then `milk.lcd=` for the controller (`milk.lcd=probe` shows every candidate), then `milk.lcd_hz=8000000`; garbled or mirrored: `milk.lcd_rot=`, `milk.lcd_madctl=`;
+wiring, then `milk.lcd=` for the controller (`milk.lcd=probe` tries 21 set-ups: controller, SPI mode, clock, pins), then `milk.lcd_hz=8000000`; garbled or mirrored: `milk.lcd_rot=`, `milk.lcd_madctl=`;
 red and blue swapped: `milk.lcd_bgr=0`; inverted colours: `milk.lcd_inv=`); (3) touch: after the desktop appears, a finger should move
 the pointer; if it lands in the wrong place or mirrored, add `milk.touch_cal=ask`, touch the crosses and copy the printed line.
 

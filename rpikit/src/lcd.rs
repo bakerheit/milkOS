@@ -3,16 +3,20 @@
 //! (`kernel/src/rpi/lcd.rs`, SPI0 and GPIO) stays thin and the host tests can run the very same code
 //! against a model of the panel.
 //!
-//! The kits sold for this are a 480x320 TFT with a resistive touch chip. Three controllers are
-//! supported, picked by a boot option ([`Controller`]):
+//! The kits sold for this are a 480x320 TFT with a resistive touch chip. Several controllers are
+//! supported, picked by a boot option ([`Controller`]); only the first is the one the driver was
+//! first written for, the rest exist so `milk.lcd=probe` can try a display nobody can identify:
 //!
 //! * `ili9486`: the common "Waveshare 3.5 inch RPi LCD (A)"-style kit. The controller runs on its
 //!   16-bit parallel bus and the SPI is turned into that bus by shift registers, so every command and
 //!   every parameter goes out as a 16-bit word (high byte 0, then the value), with D/C low for the
 //!   command and high for the parameters. Pixels are plain RGB565, two bytes each, high byte first.
-//! * `ili9488`: a controller wired to SPI directly (8-bit commands) that only takes 18-bit pixels
-//!   over SPI: three bytes per pixel.
-//! * `st7796`: the same wiring with RGB565 pixels.
+//! * `ili9486p` / `ili9486p18`: the same controller wired to SPI directly (plain 8-bit commands),
+//!   with RGB565 or 18-bit pixels (the "35B/35C" and MPI3501 style kits).
+//! * `ili9488`: a controller wired to SPI directly that only takes 18-bit pixels over SPI: three
+//!   bytes per pixel. `st7796`, `ili9481`, `r61581` and `hx8357`: the same wiring with RGB565 pixels.
+//! * `ili9341` and `st7789`: the same wiring, but their memory is 240x320, not 320x480 (the
+//!   driver draws into the part they have).
 //!
 //! The panel is a 320x480 portrait one; [`Rotation`] turns it into the 480x320 landscape the kit is
 //! used in (the default) or any other quarter turn, through the memory access control register.
@@ -205,21 +209,55 @@ impl Dirty {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Controller {
+    /// 16-bit words through shift registers, RGB565 (Waveshare 3.5 (A) style).
     Ili9486,
+    /// The same chip on plain 8-bit SPI, RGB565.
+    Ili9486P,
+    /// The same chip on plain 8-bit SPI, 18-bit pixels (three bytes).
+    Ili9486P18,
     Ili9488,
     St7796,
+    Ili9481,
+    R61581,
+    Hx8357,
+    /// 240x320 memory.
+    Ili9341,
+    /// 240x320 memory, inversion on.
+    St7789,
 }
 
+/// Every controller, in the order the docs list them.
+pub const CONTROLLERS: [Controller; 10] = [
+    Controller::Ili9486,
+    Controller::Ili9486P,
+    Controller::Ili9486P18,
+    Controller::Ili9488,
+    Controller::St7796,
+    Controller::Ili9481,
+    Controller::R61581,
+    Controller::Hx8357,
+    Controller::Ili9341,
+    Controller::St7789,
+];
+
 impl Controller {
-    /// `ili9486`, `ili9488` or `st7796` (any case).
+    /// A controller's name (any case) as `milk.lcd=` takes it: its own name, or an alias for the
+    /// same chip family (`ili9343`, `st7796s`, `hx8357d`, `hx8357b`, `mpi3501`).
     pub fn parse(s: &[u8]) -> Option<Controller> {
         let eq = |name: &str| s.eq_ignore_ascii_case(name.as_bytes());
-        if eq("ili9486") {
-            Some(Controller::Ili9486)
-        } else if eq("ili9488") {
-            Some(Controller::Ili9488)
-        } else if eq("st7796") {
+        for c in CONTROLLERS {
+            if eq(c.name()) {
+                return Some(c);
+            }
+        }
+        if eq("ili9343") {
+            Some(Controller::Ili9341)
+        } else if eq("st7796s") {
             Some(Controller::St7796)
+        } else if eq("hx8357d") || eq("hx8357b") {
+            Some(Controller::Hx8357)
+        } else if eq("mpi3501") {
+            Some(Controller::Ili9486P)
         } else {
             None
         }
@@ -227,24 +265,58 @@ impl Controller {
     pub const fn name(self) -> &'static str {
         match self {
             Controller::Ili9486 => "ili9486",
+            Controller::Ili9486P => "ili9486p",
+            Controller::Ili9486P18 => "ili9486p18",
             Controller::Ili9488 => "ili9488",
             Controller::St7796 => "st7796",
+            Controller::Ili9481 => "ili9481",
+            Controller::R61581 => "r61581",
+            Controller::Hx8357 => "hx8357",
+            Controller::Ili9341 => "ili9341",
+            Controller::St7789 => "st7789",
         }
     }
     /// Commands and their parameters go out as 16-bit words (the shift-register kits).
     pub const fn word16(self) -> bool {
         matches!(self, Controller::Ili9486)
     }
-    /// Bytes per pixel on the wire.
+    /// Bytes per pixel on the wire: 3 for the controllers that take 18-bit pixels over SPI.
     pub const fn bytes_per_pixel(self) -> usize {
         match self {
-            Controller::Ili9488 => 3,
+            Controller::Ili9488 | Controller::Ili9486P18 => 3,
             _ => 2,
+        }
+    }
+    /// The `COLMOD` (pixel format) byte for [`Controller::bytes_per_pixel`].
+    pub const fn colmod(self) -> u8 {
+        if self.bytes_per_pixel() == 3 {
+            0x66
+        } else {
+            0x55
+        }
+    }
+    /// Width and height of the controller's graphics memory, portrait.
+    pub const fn native(self) -> (usize, usize) {
+        match self {
+            Controller::Ili9341 | Controller::St7789 => (240, 320),
+            _ => (NATIVE_W, NATIVE_H),
         }
     }
     /// Does the usual module show correct colours only with the display inversion on?
     const fn inverted(self) -> bool {
-        matches!(self, Controller::St7796)
+        matches!(self, Controller::St7796 | Controller::St7789)
+    }
+    /// The same, for the model of the glass in the host tests.
+    pub const fn usually_inverted(self) -> bool {
+        self.inverted()
+    }
+}
+
+/// `milk.lcd_spi_mode=`: the SPI clock polarity and phase, `0`..`3` (the kits want 0, a few 3).
+pub fn parse_spi_mode(s: &[u8]) -> Option<u8> {
+    match s {
+        [d @ b'0'..=b'3'] => Some(d - b'0'),
+        _ => None,
     }
 }
 
@@ -305,20 +377,15 @@ impl Config {
             madctl: None,
         }
     }
-    /// Visible width and height.
+    /// Visible width and height (of the controller's memory as rotated: 480x320 landscape, or
+    /// 320x240 for the 240x320 controllers).
     pub const fn width(&self) -> usize {
-        if self.rotation.landscape() {
-            NATIVE_H
-        } else {
-            NATIVE_W
-        }
+        let (w, h) = self.controller.native();
+        if self.rotation.landscape() { h } else { w }
     }
     pub const fn height(&self) -> usize {
-        if self.rotation.landscape() {
-            NATIVE_W
-        } else {
-            NATIVE_H
-        }
+        let (w, h) = self.controller.native();
+        if self.rotation.landscape() { w } else { h }
     }
     /// The memory access control byte: the rotation (the mirroring that makes each quarter turn a
     /// true rotation of the kit's glass; 0x40, 0x20, 0x80, 0xe0 plus the BGR bit) or the override.
@@ -409,24 +476,22 @@ pub const fn rgb565_to_xrgb(v: u16) -> u32 {
 
 /// Pixels as the controller takes them: RGB565 high byte first (two bytes each), or for the
 /// 18-bit controllers R, G, B with the six colour bits in the top of each byte (three bytes
-/// each). Returns the number of bytes written; `out` must hold `px.len() * bytes_per_pixel`.
+/// each). Returns the number of bytes written: all of `px` if `out` holds `px.len() *
+/// bytes_per_pixel`, else only the whole pixels that fit.
 pub fn pack(c: Controller, px: &[u32], out: &mut [u8]) -> usize {
-    match c.bytes_per_pixel() {
-        3 => {
-            for (p, o) in px.iter().zip(out.chunks_mut(3)) {
-                o[0] = (*p >> 16) as u8 & 0xfc;
-                o[1] = (*p >> 8) as u8 & 0xfc;
-                o[2] = *p as u8 & 0xfc;
-            }
-            px.len() * 3
-        }
-        _ => {
-            for (p, o) in px.iter().zip(out.chunks_mut(2)) {
-                o.copy_from_slice(&rgb565(*p).to_be_bytes());
-            }
-            px.len() * 2
+    let bpp = c.bytes_per_pixel();
+    // Only the whole pixels that fit (so every chunk below is a whole pixel).
+    let n = px.len().min(out.len() / bpp);
+    for (p, o) in px[..n].iter().zip(out.chunks_mut(bpp)) {
+        if bpp == 3 {
+            o[0] = (*p >> 16) as u8 & 0xfc;
+            o[1] = (*p >> 8) as u8 & 0xfc;
+            o[2] = *p as u8 & 0xfc;
+        } else {
+            o.copy_from_slice(&rgb565(*p).to_be_bytes());
         }
     }
+    n * bpp
 }
 
 // ---- commands -----------------------------------------------------------------------------------
@@ -465,6 +530,13 @@ const fn e(cmd: u8, params: &'static [u8], wait: u16) -> Entry {
 }
 
 // The set-up that comes before the memory access control byte, the inversion and the display on.
+const ILI9486_GAMMA_POS: &[u8] = &[
+    0x0f, 0x1f, 0x1c, 0x0c, 0x0f, 0x08, 0x48, 0x98, 0x37, 0x0a, 0x13, 0x04, 0x11, 0x0d, 0x00,
+];
+const ILI9486_GAMMA_NEG: &[u8] = &[
+    0x0f, 0x32, 0x2e, 0x0b, 0x0d, 0x05, 0x47, 0x75, 0x37, 0x06, 0x10, 0x03, 0x24, 0x20, 0x00,
+];
+
 const ILI9486_SETUP: &[Entry] = &[
     e(SWRESET, &[], 150),
     e(SLPOUT, &[], 150),
@@ -473,22 +545,32 @@ const ILI9486_SETUP: &[Entry] = &[
     e(0xc2, &[0x44], 0),
     e(0xc5, &[0x00, 0x00, 0x00, 0x00], 0),
     // Positive and negative gamma.
-    e(
-        0xe0,
-        &[
-            0x0f, 0x1f, 0x1c, 0x0c, 0x0f, 0x08, 0x48, 0x98, 0x37, 0x0a, 0x13, 0x04, 0x11, 0x0d,
-            0x00,
-        ],
-        0,
-    ),
-    e(
-        0xe1,
-        &[
-            0x0f, 0x32, 0x2e, 0x0b, 0x0d, 0x05, 0x47, 0x75, 0x37, 0x06, 0x10, 0x03, 0x24, 0x20,
-            0x00,
-        ],
-        0,
-    ),
+    e(0xe0, ILI9486_GAMMA_POS, 0),
+    e(0xe1, ILI9486_GAMMA_NEG, 0),
+];
+
+// The same chip on plain SPI: interface mode control first (separate data in and out), then the
+// same power, VCOM and gamma; RGB565 or 18-bit pixels.
+const ILI9486P_SETUP: &[Entry] = &[
+    e(SWRESET, &[], 150),
+    e(0xb0, &[0x00], 0),
+    e(SLPOUT, &[], 150),
+    e(COLMOD, &[0x55], 0),
+    e(0xc2, &[0x44], 0),
+    e(0xc5, &[0x00, 0x00, 0x00, 0x00], 0),
+    e(0xe0, ILI9486_GAMMA_POS, 0),
+    e(0xe1, ILI9486_GAMMA_NEG, 0),
+];
+
+const ILI9486P18_SETUP: &[Entry] = &[
+    e(SWRESET, &[], 150),
+    e(0xb0, &[0x00], 0),
+    e(SLPOUT, &[], 150),
+    e(COLMOD, &[0x66], 0),
+    e(0xc2, &[0x44], 0),
+    e(0xc5, &[0x00, 0x00, 0x00, 0x00], 0),
+    e(0xe0, ILI9486_GAMMA_POS, 0),
+    e(0xe1, ILI9486_GAMMA_NEG, 0),
 ];
 
 const ILI9488_SETUP: &[Entry] = &[
@@ -551,6 +633,135 @@ const ST7796_SETUP: &[Entry] = &[
     e(0xf0, &[0x69], 0),
 ];
 
+// ILI9481 (the 320x480 TFTs of the Arduino-shield era): power, VCOM, panel driving, frame rate, gamma.
+const ILI9481_SETUP: &[Entry] = &[
+    e(SWRESET, &[], 120),
+    e(SLPOUT, &[], 120),
+    // Power setting, VCOM control, power setting for normal mode.
+    e(0xd0, &[0x07, 0x42, 0x18], 0),
+    e(0xd1, &[0x00, 0x07, 0x10], 0),
+    e(0xd2, &[0x01, 0x02], 0),
+    // Panel driving, frame rate and inversion, gamma.
+    e(0xc0, &[0x10, 0x3b, 0x00, 0x02, 0x11], 0),
+    e(0xc5, &[0x03], 0),
+    e(
+        0xc8,
+        &[
+            0x00, 0x32, 0x36, 0x45, 0x06, 0x16, 0x37, 0x75, 0x77, 0x54, 0x0c, 0x00,
+        ],
+        0,
+    ),
+    e(COLMOD, &[0x55], 0),
+];
+
+// R61581 (Renesas/Rohm): manufacturer command access on, panel and display timing, power.
+const R61581_SETUP: &[Entry] = &[
+    e(SWRESET, &[], 120),
+    e(0xb0, &[0x00], 0),
+    e(0xb3, &[0x02, 0x00, 0x00, 0x00], 0),
+    e(0xc0, &[0x13, 0x3b, 0x00, 0x02, 0x00, 0x01, 0x00, 0x43], 0),
+    e(0xc1, &[0x08, 0x16, 0x08, 0x08], 0),
+    e(0xc4, &[0x11, 0x07, 0x03, 0x03], 0),
+    e(0xc6, &[0x00], 0),
+    e(0xd0, &[0x07, 0x07, 0x1d, 0x03], 0),
+    e(0xd1, &[0x03, 0x30, 0x10], 0),
+    e(0xd2, &[0x03, 0x14, 0x04], 0),
+    e(COLMOD, &[0x55], 0),
+    e(SLPOUT, &[], 150),
+];
+
+// HX8357-D/B (Himax): extension commands on, RGB interface, VCOM, oscillator, power, display
+// cycle, gamma.
+const HX8357_SETUP: &[Entry] = &[
+    e(SWRESET, &[], 150),
+    e(0xb9, &[0xff, 0x83, 0x57], 10),
+    e(0xb3, &[0x80, 0x00, 0x06, 0x06], 0),
+    e(0xb6, &[0x25], 0),
+    e(0xb0, &[0x68], 0),
+    e(0xcc, &[0x05], 0),
+    e(0xb1, &[0x00, 0x15, 0x1c, 0x1c, 0x83, 0xaa], 0),
+    e(0xc0, &[0x50, 0x50, 0x01, 0x3c, 0x1e, 0x08], 0),
+    e(0xb4, &[0x02, 0x40, 0x00, 0x2a, 0x2a, 0x0d, 0x78], 0),
+    e(
+        0xe0,
+        &[
+            0x02, 0x0a, 0x11, 0x1d, 0x23, 0x35, 0x41, 0x4b, 0x4b, 0x42, 0x3a, 0x27, 0x1b, 0x08,
+            0x09, 0x03, 0x02, 0x0a, 0x11, 0x1d, 0x23, 0x35, 0x41, 0x4b, 0x4b, 0x42, 0x3a, 0x27,
+            0x1b, 0x08, 0x09, 0x03, 0x00, 0x01,
+        ],
+        0,
+    ),
+    e(COLMOD, &[0x55], 0),
+    e(SLPOUT, &[], 150),
+];
+
+// ILI9341 and the ILI9343 that is used the same way: power, timing, VCOM, frame rate, gamma.
+const ILI9341_SETUP: &[Entry] = &[
+    e(SWRESET, &[], 120),
+    e(0xcb, &[0x39, 0x2c, 0x00, 0x34, 0x02], 0),
+    e(0xcf, &[0x00, 0xc1, 0x30], 0),
+    e(0xe8, &[0x85, 0x00, 0x78], 0),
+    e(0xea, &[0x00, 0x00], 0),
+    e(0xed, &[0x64, 0x03, 0x12, 0x81], 0),
+    e(0xf7, &[0x20], 0),
+    e(0xc0, &[0x23], 0),
+    e(0xc1, &[0x10], 0),
+    e(0xc5, &[0x3e, 0x28], 0),
+    e(0xc7, &[0x86], 0),
+    e(COLMOD, &[0x55], 0),
+    e(0xb1, &[0x00, 0x18], 0),
+    e(0xb6, &[0x08, 0x82, 0x27], 0),
+    e(0xf2, &[0x00], 0),
+    e(0x26, &[0x01], 0),
+    e(
+        0xe0,
+        &[
+            0x0f, 0x31, 0x2b, 0x0c, 0x0e, 0x08, 0x4e, 0xf1, 0x37, 0x07, 0x10, 0x03, 0x0e, 0x09,
+            0x00,
+        ],
+        0,
+    ),
+    e(
+        0xe1,
+        &[
+            0x00, 0x0e, 0x14, 0x03, 0x11, 0x07, 0x31, 0xc1, 0x48, 0x08, 0x0f, 0x0c, 0x31, 0x36,
+            0x0f,
+        ],
+        0,
+    ),
+    e(SLPOUT, &[], 120),
+];
+
+// ST7789: porch, gate, VCOM, LCM, VDV and VRH, frame rate, power, gamma.
+const ST7789_SETUP: &[Entry] = &[
+    e(SWRESET, &[], 150),
+    e(SLPOUT, &[], 120),
+    e(COLMOD, &[0x55], 10),
+    e(0xb2, &[0x0c, 0x0c, 0x00, 0x33, 0x33], 0),
+    e(0xb7, &[0x35], 0),
+    e(0xbb, &[0x19], 0),
+    e(0xc0, &[0x2c], 0),
+    e(0xc2, &[0x01], 0),
+    e(0xc3, &[0x12], 0),
+    e(0xc4, &[0x20], 0),
+    e(0xc6, &[0x0f], 0),
+    e(0xd0, &[0xa4, 0xa1], 0),
+    e(
+        0xe0,
+        &[
+            0xd0, 0x04, 0x0d, 0x11, 0x13, 0x2b, 0x3f, 0x54, 0x4c, 0x18, 0x0d, 0x0b, 0x1f, 0x23,
+        ],
+        0,
+    ),
+    e(
+        0xe1,
+        &[
+            0xd0, 0x04, 0x0c, 0x11, 0x13, 0x2c, 0x3f, 0x44, 0x51, 0x2f, 0x1f, 0x1f, 0x20, 0x23,
+        ],
+        0,
+    ),
+];
+
 /// Reset the panel and bring it up: hardware reset pulse, then the controller's set-up, the
 /// memory access control byte, the inversion, normal mode and display on. False if a transfer
 /// failed (the panel is then not usable).
@@ -563,8 +774,15 @@ pub fn init<B: Bus>(cfg: &Config, bus: &mut B) -> bool {
     bus.delay_ms(120);
     let setup = match cfg.controller {
         Controller::Ili9486 => ILI9486_SETUP,
+        Controller::Ili9486P => ILI9486P_SETUP,
+        Controller::Ili9486P18 => ILI9486P18_SETUP,
         Controller::Ili9488 => ILI9488_SETUP,
         Controller::St7796 => ST7796_SETUP,
+        Controller::Ili9481 => ILI9481_SETUP,
+        Controller::R61581 => R61581_SETUP,
+        Controller::Hx8357 => HX8357_SETUP,
+        Controller::Ili9341 => ILI9341_SETUP,
+        Controller::St7789 => ST7789_SETUP,
     };
     for s in setup {
         if !command(cfg, bus, s.cmd, s.params) {

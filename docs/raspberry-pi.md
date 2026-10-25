@@ -69,6 +69,7 @@ them, so every existing option works unchanged:
 | `milk.selftest=full` (or a comma list) | the slow boot self-tests (kernel/src/selftest.rs) |
 | `milk.drivers="rng=kernel sound=kernel"` | which driver runs each device (docs/drivers.md) |
 | `milk.net="internet=on"` | the launcher's network policy (docs/networking.md) |
+| `milk.sdwrite=1` | allow writes to the SD card (`/dev/mmcblk0` is read-only otherwise: a card that also boots Raspberry Pi OS must not be written by accident; Disk Utility, `disks` and milkfs all see it read-only) |
 | `milk.disable=pcie,usb,genet,sdhci,rng` | start without a driver that misbehaves on a real board (edit `cmdline.txt`, no rebuild): `pcie` (and with it USB), `usb`, `genet`, `sdhci`, `rng` |
 | `milk.fbscale=N` | magnify the boot log and crash screen font N times (default 1; 2 from 1600 px wide) |
 | `milk.crashtest=early` / `late` | panic on purpose right after the display is up / once the desktop has been up 8 s (tests the crash screens); `late-off` / `late-reset`: the desktop's Shut Down / Restart after 5 s (tests the power paths) |
@@ -84,7 +85,7 @@ a card or a disk.
    of `config.txt`**, copy `milkos8.img` next to the firmware's files, and make `config.txt` say
    what `config.milkos.txt` says: `arm_64bit=1`, `kernel=milkos8.img`, `hdmi_force_hotplug=1`, `max_framebuffers=1`
    and **no `dtoverlay=vc4-kms-v3d`** (milkOS draws on the firmware's framebuffer, not on a KMS display).
-   `cmdline.txt` can stay as it is (the kernel only looks at `milk.` words) or be replaced.
+   `cmdline.txt` can stay as it is (the kernel only looks at `milk.` words) or be replaced. The card is **read-only** to milkOS unless you add `milk.sdwrite=1` (so booting it cannot damage the other system; with the stock card there is no milkfs partition to write to anyway).
 3. Put the card in a Pi 4 with an HDMI screen. To go back: restore the old `config.txt`.
 
 The firmware (start4.elf) loads `milkos8.img` at 0x80000, hands over a device tree in `x0` and starts all four cores at EL2 (the

@@ -331,6 +331,9 @@ impl Inner {
 struct SdCard {
     name: String,
     blocks: u64,
+    /// Writes are refused (the default: a card that boots another system must not be written by accident;
+    /// `milk.sdwrite=1` turns writing on).
+    ro: bool,
     inner: Mutex<Inner>,
     io: [AtomicU64; 4],
 }
@@ -366,7 +369,7 @@ impl BlockDevice for SdCard {
         self.blocks
     }
     fn read_only(&self) -> bool {
-        false
+        self.ro
     }
 
     fn read_blocks(&self, lba: u64, buf: &mut [u8]) -> Result<()> {
@@ -382,6 +385,9 @@ impl BlockDevice for SdCard {
     }
 
     fn write_blocks(&self, lba: u64, buf: &[u8]) -> Result<()> {
+        if self.ro {
+            return Err(Errno::EROFS);
+        }
         self.check(lba, buf.len())?;
         self.io[2].fetch_add(1, Ordering::Relaxed);
         self.io[3].fetch_add((buf.len() / SECTOR) as u64, Ordering::Relaxed);
@@ -563,9 +569,19 @@ pub fn init() {
             continue;
         };
         let blocks = card.blocks;
+        let writable = crate::fwcfg::find_file("opt/milkos/sdwrite").is_some_and(|f| {
+            let mut b = [0u8; 4];
+            f.size as usize <= b.len()
+                && crate::fwcfg::read_file(f, &mut b[..f.size as usize])
+                && &b[..f.size as usize] == b"1"
+        });
+        if !writable {
+            kprintln!("[sdhci] the card is read-only (milk.sdwrite=1 on the command line allows writes)");
+        }
         let dev = SdCard {
             name: format!("mmcblk{}", 0),
             blocks,
+            ro: !writable,
             inner: Mutex::new(Inner { host, card }),
             io: [const { AtomicU64::new(0) }; 4],
         };

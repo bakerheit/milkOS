@@ -40,7 +40,7 @@ else
   scripts/pi-build.sh "$T/kernel8.img" >/dev/null
 fi
 # What qemu does not supply: a device tree (qemu's raspi4b has none of its own).
-python3 scripts/pi_dtb.py "$T/pi.dtb" --cmdline ""
+python3 scripts/pi_dtb.py "$T/pi.dtb" --cmdline "milk.sdwrite=1"
 python3 scripts/mkmilkfs.py mkfs "$T/sd.img" --size 64M --label Milk >/dev/null
 # boot 3's tree: no CPUs (it must fit under the boot stub's own code at 0x300), two banks.
 python3 scripts/pi_dtb.py "$T/banks.dtb" --cpus 0 --ram-bytes 0x3b400000 --bank 0x40000000:0x40000000

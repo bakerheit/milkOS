@@ -14,6 +14,7 @@
 //! * [`ledcrash`]: the ACT LED crash cycle (boot stage, exception class, PC, fault address as counted pulses).
 //! * [`mailbox`]: VideoCore property-interface messages (framebuffer, clocks, board info).
 //! * [`pci`]: config space fields, BAR sizing and placement, bridge windows, a host bridge's `ranges`.
+//! * [`pcie`]: the root complex bring-up as an ordered step table, the VL805 handshake orders, window register maths.
 //! * [`soc`]: the BCM2711's blocks by address (the crash dump names the last device writes).
 //! * [`sd`]: SD card commands and responses, and the SDHCI register values that go with them.
 //! * [`lcd`]: the 3.5-inch SPI display on the GPIO header (ILI9486 / ILI9488 / ST7796 command streams,
@@ -41,6 +42,7 @@ pub mod logintake;
 pub mod milklog;
 pub mod mailbox;
 pub mod pci;
+pub mod pcie;
 pub mod sd;
 pub mod soc;
 pub mod touch;
@@ -54,6 +56,8 @@ mod lcdsim;
 mod lcdtests;
 #[cfg(test)]
 mod logtests;
+#[cfg(test)]
+mod pcietests;
 #[cfg(test)]
 mod testpng;
 #[cfg(test)]

@@ -203,6 +203,10 @@ pub fn crash_if_asked(stage: &str) {
         crate::serror::checkpoint("crashtest-before");
         crate::serror::simulate();
     }
+    if stage == "early" && want == b"serror-absorb" {
+        crate::serror::simulate_absorb();
+        return;
+    }
     if stage == "early" && want == b"dabt" {
         crate::serror::checkpoint("crashtest-dabt");
         // SAFETY: deliberately not: nothing maps this address, the store takes a translation fault at EL1.

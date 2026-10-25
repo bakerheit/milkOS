@@ -81,6 +81,14 @@ pub struct Bar {
     /// PCI bus address.
     pub pci_addr: u64,
     pub size: u64,
+    /// What was written to the BAR's register (low dword with the type bits) and, for a 64-bit BAR, the
+    /// high dword: to put the BAR back if the device forgets it (a reset).
+    #[cfg_attr(not(feature = "raspi"), allow(dead_code))]
+    pub lo: u32,
+    #[cfg_attr(not(feature = "raspi"), allow(dead_code))]
+    pub hi: u32,
+    #[cfg_attr(not(feature = "raspi"), allow(dead_code))]
+    pub is64: bool,
 }
 
 /// A device found by [`enumerate`].
@@ -141,6 +149,10 @@ struct Scan<'a> {
     mem: Window,
     next_bus: u8,
     found: Vec<Device>,
+    /// Bridges seen, parents before their children.
+    bridges: Vec<Bdf>,
+    /// Leave the command registers alone (the caller turns decoding on when it is ready).
+    defer: bool,
 }
 
 const MAX_DEVICES: usize = 32;
@@ -199,7 +211,12 @@ impl Scan<'_> {
                     let size = pci::bar_size(mask, 0);
                     if let Some(a) = self.mem.alloc(size, size.max(4096)) {
                         self.wr(bdf, off, a as u32);
-                        bars[i] = Bar { pci_addr: a, size };
+                        bars[i] = Bar {
+                            pci_addr: a,
+                            size,
+                            lo: a as u32,
+                            ..Bar::default()
+                        };
                     }
                 }
                 BarKind::Mem64 { .. } => {
@@ -211,9 +228,16 @@ impl Scan<'_> {
                     let size = pci::bar_size(mask, hi);
                     // Placed below 4 GiB in our window, so the high half is 0.
                     if let Some(a) = self.mem.alloc(size, size.max(4096)) {
-                        self.wr(bdf, off, a as u32 | (mask & 0xf));
+                        let lo = a as u32 | (mask & 0xf);
+                        self.wr(bdf, off, lo);
                         self.wr(bdf, hoff, (a >> 32) as u32);
-                        bars[i] = Bar { pci_addr: a, size };
+                        bars[i] = Bar {
+                            pci_addr: a,
+                            size,
+                            lo,
+                            hi: (a >> 32) as u32,
+                            is64: true,
+                        };
                     }
                     i += 1; // the next BAR is this one's high half
                 }
@@ -221,13 +245,10 @@ impl Scan<'_> {
             }
             i += 1;
         }
-        // Memory decode and bus mastering on.
-        let cmd = self.rd(bdf, cfg::COMMAND);
-        self.wr(
-            bdf,
-            cfg::COMMAND,
-            cmd & 0xffff | pci::CMD_MEMORY | pci::CMD_BUS_MASTER,
-        );
+        if !self.defer {
+            // Memory decode and bus mastering on.
+            set_command(self.host, bdf, true, true);
+        }
         self.found.push(Device {
             bdf,
             id,
@@ -242,6 +263,7 @@ impl Scan<'_> {
             return;
         }
         self.next_bus += 1;
+        self.bridges.push(bdf);
         // primary, secondary, subordinate (all the buses that can be below, for the scan).
         self.wr(
             bdf,
@@ -272,22 +294,83 @@ impl Scan<'_> {
         self.wr(bdf, cfg::PREFETCH_WINDOW, pci::BRIDGE_WINDOW_CLOSED);
         self.wr(bdf, cfg::PREFETCH_BASE_HI, 0);
         self.wr(bdf, cfg::PREFETCH_LIMIT_HI, 0);
-        let cmd = self.rd(bdf, cfg::COMMAND);
-        self.wr(
-            bdf,
-            cfg::COMMAND,
-            cmd & 0xffff | pci::CMD_MEMORY | pci::CMD_BUS_MASTER,
-        );
+        if !self.defer {
+            set_command(self.host, bdf, true, true);
+        }
     }
 }
 
+/// Set the memory-decode and bus-master bits of `bdf`'s command register to exactly `memory` / `master`
+/// (the status half of the dword is written as zeros: its bits clear on a 1).
+pub fn set_command(host: &Host, bdf: Bdf, memory: bool, master: bool) {
+    let cmd = host.cfg.read(bdf, cfg::COMMAND) & 0xffff & !(pci::CMD_MEMORY | pci::CMD_BUS_MASTER);
+    let cmd = cmd
+        | if memory { pci::CMD_MEMORY } else { 0 }
+        | if master { pci::CMD_BUS_MASTER } else { 0 };
+    host.cfg.write(bdf, cfg::COMMAND, cmd);
+}
+
+/// What [`enumerate_deferred`] found: the devices, and the bridges that lead to them (parents first).
+#[cfg_attr(not(feature = "raspi"), allow(dead_code))]
+pub struct Found {
+    pub devices: Vec<Device>,
+    pub bridges: Vec<Bdf>,
+}
+
+#[cfg_attr(not(feature = "raspi"), allow(dead_code))]
+impl Found {
+    /// Memory decode and bus mastering on or off for the bridges (parents first) and then the devices.
+    pub fn set_commands(&self, host: &Host, memory: bool, master: bool) {
+        for b in &self.bridges {
+            set_command(host, *b, memory, master);
+        }
+        for d in &self.devices {
+            set_command(host, d.bdf, memory, master);
+        }
+    }
+}
+
+/// Put `d`'s BARs back as [`enumerate`] placed them if they read differently now. Returns whether anything
+/// had to be rewritten (a device that was reset forgets its BARs).
+#[cfg_attr(not(feature = "raspi"), allow(dead_code))]
+pub fn restore_bars(host: &Host, d: &Device) -> bool {
+    let mut changed = false;
+    for (i, b) in d.bars.iter().enumerate().filter(|(_, b)| b.size != 0) {
+        let off = cfg::BAR0 + 4 * i as u16;
+        if host.cfg.read(d.bdf, off) != b.lo
+            || (b.is64 && host.cfg.read(d.bdf, off + 4) != b.hi)
+        {
+            host.cfg.write(d.bdf, off, b.lo);
+            if b.is64 {
+                host.cfg.write(d.bdf, off + 4, b.hi);
+            }
+            changed = true;
+        }
+    }
+    changed
+}
+
 /// Enumerate everything behind `host`: bus numbers, BARs, command registers. Logs what it finds.
+#[cfg(not(feature = "raspi"))]
 pub fn enumerate(host: &Host) -> Vec<Device> {
+    scan(host, false).devices
+}
+
+/// [`enumerate`] without touching any command register: the caller turns decoding on with
+/// [`Found::set_commands`] when it is ready (the Pi must make a firmware call first).
+#[cfg_attr(not(feature = "raspi"), allow(dead_code))]
+pub fn enumerate_deferred(host: &Host) -> Found {
+    scan(host, true)
+}
+
+fn scan(host: &Host, defer: bool) -> Found {
     let mut s = Scan {
         host,
         mem: Window::new(host.window_pci, host.window_size),
         next_bus: host.first_bus + 1,
         found: Vec::new(),
+        bridges: Vec::new(),
+        defer,
     };
     s.scan_bus(host.first_bus);
     let verbose = crate::platform::RASPI;
@@ -315,7 +398,10 @@ pub fn enumerate(host: &Host) -> Vec<Device> {
             );
         }
     }
-    s.found
+    Found {
+        devices: s.found,
+        bridges: s.bridges,
+    }
 }
 
 /// A kernel virtual address for `len` bytes of device registers at CPU physical `pa`: through the boot

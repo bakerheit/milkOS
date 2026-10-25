@@ -24,7 +24,7 @@ Files: `kernel/src/platform.rs` (the board table), `kernel/src/el.S` (EL2 to EL1
 | SD card (SDHCI, polled PIO), as `/dev/mmcblk0`, milkfs on it | **runs** on qemu (its EMMC controller); **untested** on EMMC2 of a real board |
 | RAM from the device tree, several banks and holes | **runs** on qemu (two banks and a hole, the GPU's); 4 GB / 8 GB layouts are unit-tested and the allocator above 4 GiB is tested on qemu virt |
 | Hardware random generator (RNG200) | **untested** (qemu does not model it); falls back to the jitter-seeded CSPRNG |
-| PCIe root complex + xHCI USB (the VL805: the four USB ports) | the xHCI driver and the HID keyboard/mouse **run** on qemu virt (`usb-test`); the PCIe bring-up of the BCM2711 is **untested** |
+| PCIe root complex + xHCI USB (the VL805: the four USB ports) | the xHCI driver and the HID keyboard/mouse **run** on qemu virt (`usb-test`); the PCIe bring-up of the BCM2711 got as far as the VL805 on a real board and then raised an SError; reworked (steps, survivable rejections, `milk.pcie=probe`), still **unconfirmed** until the next real run |
 | Ethernet (GENET + BCM54213PE PHY) | **untested**: qemu has no GENET; written from the register layout, logs every step |
 | The 3.5-inch SPI display on the GPIO header and its touch chip (`milk.lcd=`) | the driver, the panel's byte streams and the touch maths are **host-tested against a model of both chips**; the whole driver **runs** on qemu raspi4b against its SPI0 controller with nothing wired to it; **untested on a real panel** (see "3.5-inch SPI display") |
 | Wi-Fi (CYW43455 over SDIO), Bluetooth, the official DSI touchscreen, audio, the GPU | not started |
@@ -80,6 +80,7 @@ them, so every existing option works unchanged:
 | `milk.fbscale=N` | magnify the boot log and crash screen font N times (default 1; 2 from 1600 px wide) |
 | `milk.ledcodes=0` | no ACT LED progress codes (the LED just turns on at the start of `kmain`; the `led: stage` log lines stay; the "log saved" signal and the log error blink are off too). Default on; the codes add about 9 s to a boot |
 | `milk.lcd=ili9486` (or `ili9486p`, `ili9486p18`, `ili9488`, `st7796`, `ili9481`, `r61581`, `hx8357`, `ili9341`, `st7789`) | the 3.5-inch SPI display on the GPIO header (off without it; many more options: "3.5-inch SPI display"); `milk.lcd=probe` tries them all |
+| `milk.pcie=probe` | the PCIe + VL805 bring-up in diagnostic mode: a checkpoint after every register access, a `pcie: step N name ok` line per step, and every order of the firmware handshake tried ("PCIe + USB"); `milk.disable=pcie` skips the controller (and with it USB) altogether |
 | `milk.serror=trace` / `paranoid` / `off` | the SError checkpoints and the register write breadcrumbs ("Reading a crash"); `trace` is the default on the Pi image, `off` makes them no-ops, `paranoid` adds a checkpoint after every register write of the Pi drivers (slow; pins an SError to one register) |
 | `milk.crashtest=serror` / `dabt` | the exception dump instead of a panic, right after the display is up: a fake SError taken at a checkpoint (qemu cannot raise a real one), or a real data abort (a store to an unmapped address) |
 | `milk.logstorm=N` | once the boot is over, print N lines as fast as the console takes them: tests the SD card log's rate cap (`pi-log-multiboot-test`) |
@@ -273,6 +274,7 @@ are `area-step`. Where they are:
 | `gic-init` `timer-init` `uart-init` | after each of them |
 | `rpi-init-entry` `rpi-mailbox-info` `rpi-rng` `rpi-sdhci` `rpi-genet` `rpi-init-done` | `rpi::init`, between its steps |
 | `mbox-call` | at the end of every mailbox transaction (the firmware wrote into our memory by DMA) |
+| `pcie-<step>`, `pcie-order-<name>`, `pcie-bar-read`, `pcie-park`, `pcie-done`, `pcie-xhci-start`, `pcie-xhci-poll` | the PCIe + VL805 bring-up ("PCIe + USB"): one per step, one per handshake order, around the first BAR read, the park after a failure, the end, and the xHCI driver's start and polling loop. An SError taken at a `pcie-*` checkpoint (or at any checkpoint of the USB thread during the bring-up) is survived, not fatal |
 | `sdhci-clock` `sdhci-card` | inside the SD driver's init |
 | `genet-buffers` `genet-power-up` `genet-umac-reset` `genet-dma-off` `genet-umac-setup` `genet-rings` `genet-phy` `genet-irq` `genet-irq-on` `genet-dma-on` | the sub-steps of the Ethernet MAC's bring-up, in order (the driver catches an SError at all of them but `genet-buffers`: see "GENET bring-up") |
 | `virtio-init` `crypto-init` `irq-enable` `lcd-irqs-live` `memtest` `fs-init` | the rest of the early boot |
@@ -807,14 +809,49 @@ the "jitter only" warning appears.
 
 **LED** (`rpi/led.rs`, patterns in `rpikit::ledcode`): GPIO 42 as an output, on at the start of `kmain`, then the progress codes (see "Reading the ACT LED"); the crash cycle after a crash (see "After a crash").
 
-**PCIe + USB** (`rpi/pcie.rs`, `pci.rs`, `usb/`, `rpikit::{pci,usb}`). The four USB-A ports of a Pi 4 are root ports of a VIA VL805
-xHCI controller on the BCM2711's PCIe x1 link. Bring-up (`rpi/pcie.rs`, **untested**): reset the bridge, SerDes out of
-IDDQ, inbound window (PCI 0 = CPU 0, 4 GiB BAR2), outbound window from the tree's `ranges` (stock: PCI
-`0xc0000000` = CPU `0x6_0000_0000`, 1 GiB), release PERST#, wait for the link, set the class code of the root port, then
-`pci::enumerate` places the BARs and bridge windows (`rpikit::pci::Window`/`bridge_mem_window`, host-tested), enables memory
-decoding and bus mastering, and the firmware is told about the VL805 (`NOTIFY_XHCI_RESET`, the call Linux makes). Config space of
-the root port is the controller's register file; everything behind it goes through the index/data pair (`EXT_CFG_INDEX` 0x9000,
-`EXT_CFG_DATA` 0x8000). The **xHCI driver** (`usb/xhci.rs`) is complete for what it does and runs on qemu virt's `qemu-xhci`:
+**PCIe + USB** (`rpi/pcie.rs`, `pci.rs`, `usb/`, `rpikit::{pci,pcie,usb}`). The four USB-A ports of a Pi 4 are root ports of a VIA VL805
+xHCI controller on the BCM2711's PCIe x1 link. Bring-up (`rpi/pcie.rs`), as a table of steps (`rpikit::pcie::STEPS`, host-tested) each of which ends
+with an SError checkpoint named `pcie-<step>`:
+
+| # | step | what |
+|---|---|---|
+| 1-3 | `bridge-reset`, `bridge-release`, `serdes-power` | reset the bridge, release it, SerDes out of IDDQ |
+| 4 | `misc-ctrl` | 128-byte bursts, config reads of absent functions return all ones, memory access on |
+| 5 | `inbound-window` | PCI 0 = CPU 0, 4 GiB (BAR2), BAR1/BAR3 off, the matching SCB size, little-endian |
+| 6 | `intr-mask` | mask and clear the controller's interrupts (nothing here handles them) |
+| 7-8 | `perst-release`, `link-wait` | release PERST#, wait 100 ms, wait for PHY link and data link, check root complex mode |
+| 9 | `outbound-window` | from the tree's `ranges` (stock: PCI `0xc0000000` = CPU `0x6_0000_0000`, 1 GiB) |
+| 10 | `root-port` | class code PCI-PCI bridge, no L0s, read the root port's id |
+| 11 | `enumerate` | `pci::enumerate_deferred`: bus numbers, BARs, bridge windows; **the command registers stay off** |
+| 12 | `vl805-handshake` | the firmware is told about the VL805 (`NOTIFY_XHCI_RESET`, argument `bus<<20 | dev<<15 | fn<<12` = `0x100000` for 01:00.0) with memory decoding and bus mastering still off; the chip must then answer with the same id (its BARs are put back if the reset wiped them) |
+| 13 | `enable` | memory decoding and bus mastering on (bridge first), then the first read of the controller's BAR (an xHCI answers `0x01000020`-ish: version 1.00, 32 bytes of capability registers) |
+
+Config space of the root port is the controller's register file; everything behind it goes through the index/data pair (`EXT_CFG_INDEX` 0x9000,
+`EXT_CFG_DATA` 0x8000).
+
+*What the first real board showed* (a Pi 4B rev 1.5, 8 GB, Ethernet off): the root complex came up, the link came up (status `0xb0`), the root port answered
+`14e4:2711`, the VL805 enumerated (`1106:3483`, class `0c0330`, BAR0 4 KiB at PCI `0xc0000000`), and then an **SError** was taken at the mailbox
+call's checkpoint, `mbox-call`, with `NOTIFY_XHCI_RESET` the newest register write. That does not prove the firmware call is the culprit: the
+previous checkpoint that had passed on that CPU was the first run of a user thread, long before, and the call's checkpoint was the first
+one after the whole bring-up, so **any** access of it (a config write, a window register, the call itself) could have been rejected. Hence the
+checkpoint per step. The strongest suspect remains the order: the first version enabled memory decoding and bus mastering on the root port and
+the device and only then asked the firmware to reset the chip, so a link bounce met a bus-mastering endpoint; a driver that enables the device
+only when its own driver loads makes the call with decoding off, which is now the default order (`notify-first`).
+
+An SError found at one of the bring-up's checkpoints (`pcie-*` labels, anything on the USB thread while the bring-up runs, the xHCI start and its
+polling loop) is **survived**: `serror: absorbed an SError at checkpoint ...` with the usual attribution and the register writes is logged, the step
+is reported `FAILED`, the controller is held in reset again and USB is skipped; the desktop and everything else go on. (With `milk.serror=off` there
+are no checkpoints and nothing is survived.) `milk.disable=pcie` skips the controller altogether.
+
+**`milk.pcie=probe`**: the same bring-up with a checkpoint after every register access (named by the step, so the dump's newest-writes list ends at
+the register the SoC rejected), a `pcie: step N name ok` line per step, and the firmware handshake tried in **every** order of `rpikit::pcie::ORDERS`
+(1 `notify-first`: call with memory decoding and bus mastering off, the default; 2 `notify-memory-on`; 3 `notify-all-on`: the first version's order;
+4 `no-notify`: no call, for boards whose VL805 loads its own code), each reported as `pcie: order N name (...): ok` or `FAILED`. In the normal mode the
+orders are tried in the same sequence until one works. Read the lines in order; the first `FAILED` names where the board objects.
+
+The checks that were *not* made, as a list for the next round if this is not it: the controller's UBUS reply-error settings, the RCB/MPS mode bits of
+`MISC_CTRL`, the exact window the firmware's own tree programs for DMA (`dma-ranges`: PCI `0x4_0000_0000` -> CPU 0, 8 GiB on this 8 GB board; ours is PCI 0 -> CPU 0,
+4 GiB, with the DMA limit keeping buffers under 3 GiB), and a delay between the firmware call and the first access. The **xHCI driver** (`usb/xhci.rs`) is complete for what it does and runs on qemu virt's `qemu-xhci`:
 reset, context base array, scratchpad, command ring, one event ring, ports (reset, speed), Enable Slot / Address Device /
 Evaluate Context / Configure Endpoint, control transfers, interrupt IN endpoints, hot unplug, all polled from a thread every
 4 ms, with 32- or 64-byte contexts, every wait bounded and the DMA memory synced with explicit cache maintenance (the BCM2711's PCIe
@@ -901,10 +938,11 @@ problem is the MDIO clock / PHY reset. (4) Link up but no frames: RGMII delays (
    check the LED (the 1 s start marker = the kernel ran; see "Reading the ACT LED"), `config.txt` (arm_64bit, kernel name, no KMS overlay), the card's other files.
 2. **SD card.** Look for `[sdhci] 0xfe340000: card ready`. If EMMC2 does not answer, the log says at which command; the base clock
    is logged by the mailbox (`clock_rate`). A card without a milkfs partition: the desktop runs from RAM.
-3. **USB.** Look for the `[pcie]` lines (link up status word), `[pci]` (the VL805: vendor 1106, device 3483, class 0c0330), `[usb] xHCI`, then
-   `port N: ...: keyboard` / `mouse`. If the link is down the first suspects are the PERST# timing, the SerDes IDDQ bit and the window
-   registers (all in `rpi/pcie.rs`, each written from the Broadcom core's documented sequence); if the VL805 enumerates but the xHCI
-   does not start, the `NOTIFY_XHCI_RESET` call and the DMA window are next.
+3. **USB.** Look for the `[pcie]` lines (link up status word), `[pci]` (the VL805: vendor 1106, device 3483, class 0c0330), `[pcie] ... BAR0 reads 0x0100....`
+   (the first read of the controller), `[usb] xHCI`, then `port N: ...: keyboard` / `mouse`. If a `pcie: step N ... FAILED` or `serror: absorbed` line
+   appears, the register writes under it name the access the SoC rejected. Not clear? Put `milk.pcie=probe` in `cmdline.txt`: the next log has a line per step
+   and the result of every order of the firmware handshake. If the link is down the first suspects are the PERST# timing, the SerDes IDDQ bit and the window
+   registers (all in `rpi/pcie.rs`); if the VL805 enumerates but the xHCI does not start, the `NOTIFY_XHCI_RESET` call and the DMA window are next.
 4. **Ethernet.** `[genet]` lines: the version register, the PHY id (BCM54213PE answers `0x600d84a?`), link up with speed and duplex,
    then `[net] dhcp`. If the PHY answers but no frames arrive: RGMII delays (`ID_MODE_DIS`; the PHY's skew straps), the descriptor ring
    registers, promiscuous mode.

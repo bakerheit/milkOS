@@ -292,6 +292,7 @@ extern "C" fn exception_entry(frame: &mut TrapFrame, vector: usize) {
             }
         }
         2 => crash(frame, vector, "FIQ (unexpected: we only use IRQ)"),
+        _ if crate::serror::absorb(crate::percpu::id(), vector, frame.esr) => {}
         _ => {
             if !crate::serror::swallow(frame, vector) {
                 crash(frame, vector, "SError")

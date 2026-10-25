@@ -28,6 +28,10 @@
 #           screen as before); 11: bad option values are refused and the defaults used; 12: an unknown controller; 14, 15: `milk.lcd=probe` (every candidate set-up shows its number card, colour flashes and text card, then the boot goes on; 15: its own options).
 #           What qemu cannot show: whether any pixel reaches a glass (the host tests of rpikit's panel model prove the
 #           byte stream; the real board is the test of the wiring).
+#   boots 16 to 19: the exception dump (docs/raspberry-pi.md, "Reading a crash"): `milk.crashtest=serror` runs a fake SError (qemu cannot raise a real
+#           one) through the real crash path at a checkpoint, `milk.crashtest=dabt` is a real data abort right after a checkpoint, and
+#           `milk.serror=off` makes the checkpoints no-ops, `milk.serror=paranoid` adds one after every register write; the ESR decode, FAR/ELR/SPSR, the checkpoint attribution and the register write
+#           breadcrumbs are checked in the log, the checkpoint cost is bounded, and boot 1 proves the checkpoints are silent when nothing is pending.
 # Offline, private images in a fresh /tmp folder, the qemu started here killed by PID.
 # TCG (no hvf for raspi), so a boot takes about 10-30 s.
 #
@@ -141,6 +145,10 @@ PIN=$(cat "$T/pin1")
 echo "$PIN" | grep -Eq '10+1' && ok "LED pin: high, dark (the start marker and the codes), high again (solid on)" || bad "LED pin never did high-dark-high: ${PIN:0:80}..."
 case "$PIN" in *1) ok "LED pin: solid on at the end";; *) bad "LED pin is not on at the end";; esac
 has 'KERNEL PANIC|kernel panic' && bad "a kernel panic" || ok "no panic"
+check '^serror: checkpoints and write breadcrumbs on' "the SError checkpoints are on by default"
+COST=$(tr -d '\r' < "$LOG" | sed -n -E 's/^serror: a checkpoint costs ([0-9]+) ns .*/\1/p' | head -1)
+[ -n "$COST" ] && [ "$COST" -lt 20000 ] && ok "a checkpoint costs $COST ns (under qemu's TCG)" || bad "checkpoint cost missing or too high: '$COST'"
+has '\*\*\* KERNEL EXCEPTION' && bad "an exception dump in a normal boot" || ok "no exception dump: every checkpoint passed"
 out system | grep -Eq '^CPUs +4' && ok "system says 4 CPUs" || bad "system: $(out system)"
 out system | grep -Eq '^memory +[0-9]+ MB' && ok "system: $(out system | grep '^memory')" || bad "system has no memory line"
 out disks | grep -q 'milkfs.*/Volumes/Milk' && ok "disks lists the card's milkfs" || bad "disks: $(out disks)"
@@ -356,6 +364,65 @@ N=$(tr -d '\r' < "$LOG" | grep -Eac '^lcd: probe [0-9]+/18 .*: start ')
 check '^lcd: probe 16/18 ili9486 4 MHz mode 3 DC24 RST25: start .*backlight high: none by the probe' "boot 15: with the sweeps off the probe drives no backlight pin"
 check '^lcd: probe finished in [0-9]+ ms: 3 set-up\(s\) shown, 0 skipped' "boot 15: probe ends"
 check 'wm: desktop up' "boot 15: the boot goes on after the probe"
+
+# ---- boots 16 to 19: the exception dump (ESR decode, checkpoints, register write breadcrumbs). qemu cannot raise an SError, so boot 16 sends a
+# fake one through the real crash path (kernel/src/serror.rs `simulate`); boot 17 is a real data abort; boot 18 has the checkpoints off. ----
+python3 scripts/pi_dtb.py "$T/dump.dtb" --cmdline "milk.crashtest=serror"
+DTB_ARGS=(-dtb "$T/dump.dtb")
+boot 16 "wait@300:\*\*\* halted \*\*\*"
+sleep 1
+stop
+check '^\*\*\* KERNEL EXCEPTION: SError \*\*\*' "boot 16: the SError dump"
+check '^  vector 7 \(current EL, SP_ELx\), cpu 0, thread ' "boot 16: vector, cpu and thread"
+check '^  ESR_EL1 = 0xbe000000  EC=0x2f \(SError\) IL=1 ISS=0x0000000' "boot 16: ESR_EL1 in full with the class name"
+check '^  IDS=0 IESB=0 AET=0 \(uncontainable\) EA=0 DFSC=0x00 \(uncategorized\)' "boot 16: the SError syndrome fields"
+check '^  this CPU has no RAS extension' "boot 16: the dump says the syndrome is not architected here"
+check '^  ELR_EL1 = 0x[0-9a-f]{16}  \(where the CPU was, not the culprit\)' "boot 16: ELR_EL1, with the warning"
+check '^  FAR_EL1 = 0x[0-9a-f]{16}$' "boot 16: FAR_EL1"
+check '^  SPSR_EL1 = 0x000003c5  EL1h .*DAIF=' "boot 16: SPSR_EL1 decoded"
+check 'SCTLR_EL1 = 0x[0-9a-f]+  ISR_EL1 = 0x[0-9a-f]+ \(pending now: .*ID_AA64PFR0_EL1 = 0x[0-9a-f]+ \(RAS: none\)' "boot 16: SCTLR, ISR (pending bits), the RAS field"
+check "^  SError at checkpoint 'crashtest-serror' on cpu 0" "boot 16: the checkpoint that took it"
+check "^  the access that caused it happened after checkpoint 'crashtest-before' passed and before 'crashtest-serror' " "boot 16: the window the culprit is in"
+check '^    0x[0-9a-f]+ genet\+0x4018 <- 0x00000003$' "boot 16: a register write breadcrumb, with the block's name"
+check '^  last 8 register writes on cpu 0 \(oldest first\):' "boot 16: the list of writes"
+check "^  where: SError AT checkpoint 'crashtest-serror', after 'crashtest-before'" "boot 16: the closing summary names the checkpoints"
+check '^  summary: SError, cpu 0, thread .*ESR 0xbe000000 \(EC 0x2f SError\)' "boot 16: the one-line summary"
+check '^led: crash code stage=[0-9] ec=0o57 ' "boot 16: the LED code is still the SError's (ec 0o57)"
+# The summary is the last thing before 'halted': the crash screen shows the end of the log.
+tr -d '\r' < "$LOG" | grep -a -A3 '^  where: SError AT' | grep -aq '^\*\*\* halted' && ok "boot 16: the summary is the last thing in the dump" || bad "boot 16: lines between the summary and 'halted'"
+
+python3 scripts/pi_dtb.py "$T/dump.dtb" --cmdline "milk.crashtest=dabt"
+boot 17 "wait@300:\*\*\* halted \*\*\*"
+sleep 1
+stop
+check '^\*\*\* KERNEL EXCEPTION: synchronous exception \*\*\*' "boot 17: the data abort dump"
+check '^  ESR_EL1 = 0x96000044  EC=0x25 \(data abort, same EL\) IL=1 ISS=0x0000044' "boot 17: ESR_EL1 in full"
+check '^  data abort: translation fault, level 0 on write' "boot 17: the fault and the direction"
+check '^  DFSC=0x04 WnR=1 CM=0 S1PTW=0 EA=0 FnV=0' "boot 17: DFSC, WnR and the other flags"
+check '^  FAR_EL1 = 0xfffff000dead0010  \(address accessed\)' "boot 17: the address the store hit"
+check '^  ELR_EL1 = 0x[0-9a-f]{16}  \(faulting pc\)' "boot 17: ELR_EL1"
+check "^  last SError checkpoint that passed on cpu 0: 'crashtest-dabt'" "boot 17: the last checkpoint that passed"
+check '^led: crash code stage=[0-9] ec=0o45 ' "boot 17: the LED code is the data abort's (ec 0o45)"
+
+python3 scripts/pi_dtb.py "$T/dump.dtb" --cmdline "milk.serror=off milk.crashtest=serror"
+boot 18 "wait@300:\*\*\* halted \*\*\*"
+sleep 1
+stop
+check '^serror: checkpoints and write breadcrumbs off \(milk.serror=off\)' "boot 18: milk.serror=off is acknowledged"
+check '^  SError checkpoints are off \(milk.serror=off\): no attribution' "boot 18: the dump says there is no attribution"
+has "SError at checkpoint|register writes on cpu|serror: a checkpoint costs" && bad "boot 18: checkpoints ran with milk.serror=off" || ok "boot 18: no checkpoints, no breadcrumbs, no timing"
+check '^  ESR_EL1 = 0xbe000000  EC=0x2f \(SError\)' "boot 18: the ESR is decoded regardless"
+
+# boot 19: milk.serror=paranoid, a checkpoint after every register write of the drivers: the whole early boot runs through it, then the fake SError
+# (taken at 'mmio-write' this time, so the dump names the register of the newest write).
+python3 scripts/pi_dtb.py "$T/dump.dtb" --cmdline "milk.serror=paranoid milk.crashtest=serror"
+boot 19 "wait@300:\*\*\* halted \*\*\*"
+sleep 1
+stop
+check '^serror: paranoid: checkpoints and write breadcrumbs on, and a checkpoint after every register write' "boot 19: paranoid mode is acknowledged"
+check '^\*\*\* KERNEL EXCEPTION: SError \*\*\*' "boot 19: the dump comes out of paranoid mode (the early boot ran through a checkpoint per register write)"
+check '^\[sdhci\] .*card ready' "boot 19: the SD card was brought up with a checkpoint after every register write"
+check "^  SError at checkpoint 'crashtest-serror' on cpu 0" "boot 19: the fake SError"
 
 # ---- boot 13 (only if MILK_REAL_DTB names a device tree from a real board's boot partition: it is not in the repository) ----
 if [ -n "${MILK_REAL_DTB:-}" ] && [ -r "$MILK_REAL_DTB" ]; then

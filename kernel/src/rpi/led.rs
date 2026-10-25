@@ -38,6 +38,7 @@ const PIN_BIT: u32 = 1 << (42 - 32);
 
 fn reg_write(off: usize, v: u32) {
     // SAFETY: GPIO registers, mapped as Device memory (platform.rs).
+    crate::serror::note_led(GPIO + off, v);
     unsafe { write_volatile((GPIO + off) as *mut u32, v) }
 }
 
@@ -46,6 +47,7 @@ fn make_output() {
     unsafe {
         let p = (GPIO + GPFSEL4) as *mut u32;
         let v = read_volatile(p);
+        crate::serror::note_led(p as usize, v & !(0b111 << 6) | (0b001 << 6));
         write_volatile(p, v & !(0b111 << 6) | (0b001 << 6));
     }
 }

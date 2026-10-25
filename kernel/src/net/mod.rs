@@ -263,6 +263,8 @@ pub fn on_device_irq() {
 fn net_thread() {
     let mut http: Option<services::Http> = None;
     loop {
+        // A pending SError is taken here, once per pass (every packet or timer), and named.
+        crate::serror::checkpoint("net-thread");
         services::adopt(&mut http);
         jitter();
         with(|st| {
@@ -306,9 +308,9 @@ pub fn init() {
         st.iface.ll_start(now);
         for (k, l) in st.iface.links.iter().enumerate().filter(|(_, l)| l.up()) {
             kprintln!(
-                "[net] {}: virtio slot {}, mac {}{}",
+                "[net] {}: {}, mac {}{}",
                 iface::LINK_NAMES[k],
-                l.slot,
+                l.dev.as_ref().map_or(nic::NicLabel::none(), |d| d.label(l.slot)),
                 l.mac,
                 if v6only {
                     ", IPv6 only"

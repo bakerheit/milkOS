@@ -337,6 +337,16 @@ fn sync(frame: &mut TrapFrame, vector: usize) {
 /// CPU number + 1 of the CPU printing a crash dump (0: none).
 static CRASHING: AtomicUsize = AtomicUsize::new(0);
 
+/// Read a system register by name.
+macro_rules! read_sysreg {
+    ($name:literal) => {{
+        let v: u64;
+        // SAFETY: a read of a register that exists at EL1.
+        unsafe { asm!(concat!("mrs {}, ", $name), out(reg) v, options(nomem, nostack)) };
+        v
+    }};
+}
+
 fn halt() -> ! {
     unsafe { asm!("msr daifset, #0xf", options(nomem, nostack)) };
     loop {
@@ -380,10 +390,8 @@ pub fn crash(frame: &TrapFrame, vector: usize, what: &str) -> ! {
         halt();
     }
 
+    crate::serror::dying();
     let esr = frame.esr;
-    let ec = (esr >> 26) & 0x3f;
-    let il = (esr >> 25) & 1;
-    let iss = esr & 0x01ff_ffff;
     let source = match vector / 4 {
         0 => "current EL, SP_EL0",
         1 => "current EL, SP_ELx",
@@ -394,29 +402,50 @@ pub fn crash(frame: &TrapFrame, vector: usize, what: &str) -> ! {
     kprintln!("\n*** KERNEL EXCEPTION: {what} ***");
     let (tid, name) = crate::sched::current_for_crash();
     kprintln!("  vector {vector} ({source}), cpu {cpu}, thread {tid} ({name})");
-    if vector % 4 == 0 {
+    let pfr0 = read_sysreg!("id_aa64pfr0_el1");
+    let ras = rpikit::esr::pfr0_ras(pfr0) != 0;
+    let ec = rpikit::esr::ec(esr);
+    if vector % 4 == 0 || vector % 4 == 3 {
         kprintln!(
-            "  ESR_EL1 = {:#010x}  EC={:#04x} ({}) IL={} ISS={:#09x}",
-            esr,
-            ec,
-            ec_name(ec),
-            il,
-            iss
+            "{}",
+            rpikit::esr::Decode {
+                esr,
+                far: frame.far,
+                ras
+            }
         );
-        match ec {
-            EC_DABT_LOWER | EC_DABT_SAME => dump_data_abort(frame, iss),
-            EC_IABT_LOWER | EC_IABT_SAME => dump_inst_abort(frame, iss),
-            EC_SVC64 | EC_BRK64 => kprintln!("  immediate = {:#x}", iss & 0xffff),
-            0x22 | 0x26 | 0x34 | 0x35 => kprintln!("  FAR_EL1 = {:#018x}", frame.far),
-            _ => {}
-        }
+    } else {
+        // IRQ / FIQ vector that should not be taken: ESR_EL1 is whatever the last synchronous exception left.
+        kprintln!("  ESR_EL1 = {esr:#010x}  (stale: not an ESR-reporting vector)");
     }
-    kprintln!("  ELR_EL1 = {:#018x}  (faulting pc)", frame.elr);
     kprintln!(
-        "  SPSR    = {:#010x}  {}",
+        "  ELR_EL1 = {:#018x}  ({})",
+        frame.elr,
+        if vector % 4 == 3 {
+            "where the CPU was, not the culprit"
+        } else {
+            "faulting pc"
+        }
+    );
+    if vector % 4 != 0 || !rpikit::esr::decode_prints_far(ec) {
+        kprintln!("  FAR_EL1 = {:#018x}", frame.far);
+    }
+    kprintln!(
+        "  SPSR_EL1 = {:#010x}  {}",
         frame.spsr,
         spsr_desc(frame.spsr)
     );
+    kprintln!(
+        "  SCTLR_EL1 = {:#010x}  ISR_EL1 = {:#x} (pending now: {})  ID_AA64PFR0_EL1 = {:#x} (RAS: {})  MPIDR = {:#x}",
+        read_sysreg!("sctlr_el1"),
+        read_sysreg!("isr_el1"),
+        rpikit::esr::isr_pending(read_sysreg!("isr_el1")),
+        pfr0,
+        rpikit::esr::ras_name(rpikit::esr::pfr0_ras(pfr0)),
+        read_sysreg!("mpidr_el1")
+    );
+    crate::serror::print_ras(pfr0);
+    crate::serror::report(cpu, vector);
     kprintln!("  SP_EL0  = {:#018x}", frame.sp_el0);
     kprintln!("  SP_EL1  = {:#018x}", frame.kernel_sp());
     for (i, pair) in frame.x[..30].chunks(2).enumerate() {
@@ -429,6 +458,14 @@ pub fn crash(frame: &TrapFrame, vector: usize, what: &str) -> ! {
         );
     }
     kprintln!("  x30 = {:#018x}  (lr)", frame.x[30]);
+    // The crash screen shows the end of the log: say the important things once more, last.
+    kprintln!(
+        "  summary: {what}, cpu {cpu}, thread {name}, ESR {esr:#x} (EC {ec:#04x} {}), ELR {:#x}, FAR {:#x}",
+        rpikit::esr::ec_name(ec),
+        frame.elr,
+        frame.far
+    );
+    crate::serror::summary(cpu, vector);
     kprintln!("*** halted ***");
     if crate::platform::RASPI {
         // No serial cable on the Pi: the same dump on the screens, then the LED cycle (the code line
@@ -448,108 +485,12 @@ pub fn crash(frame: &TrapFrame, vector: usize, what: &str) -> ! {
     halt();
 }
 
-fn dump_data_abort(frame: &TrapFrame, iss: u64) {
-    let fsc = iss & 0x3f;
-    let write = iss & (1 << 6) != 0;
-    let s1ptw = iss & (1 << 7) != 0;
-    let cache_maint = iss & (1 << 8) != 0;
-    let fnv = iss & (1 << 10) != 0;
-    kprintln!(
-        "  data abort: {} on {}{}{}",
-        fault_status(fsc),
-        if cache_maint {
-            "cache maintenance"
-        } else if write {
-            "write"
-        } else {
-            "read"
-        },
-        if s1ptw { " (stage 1 table walk)" } else { "" },
-        if iss & (1 << 24) != 0 {
-            // ISV: syndrome valid, SAS gives the access size.
-            match (iss >> 22) & 3 {
-                0 => ", 1 byte",
-                1 => ", 2 bytes",
-                2 => ", 4 bytes",
-                _ => ", 8 bytes",
-            }
-        } else {
-            ""
-        }
-    );
-    if fnv {
-        kprintln!("  FAR_EL1 = not valid");
-    } else {
-        kprintln!("  FAR_EL1 = {:#018x}  (address accessed)", frame.far);
-    }
-}
-
-fn dump_inst_abort(frame: &TrapFrame, iss: u64) {
-    kprintln!("  instruction abort: {}", fault_status(iss & 0x3f));
-    if iss & (1 << 10) != 0 {
-        kprintln!("  FAR_EL1 = not valid");
-    } else {
-        kprintln!("  FAR_EL1 = {:#018x}  (address fetched)", frame.far);
-    }
-}
-
 pub(crate) fn fault_status(fsc: u64) -> &'static str {
-    match fsc {
-        0x00 => "address size fault, level 0",
-        0x01 => "address size fault, level 1",
-        0x02 => "address size fault, level 2",
-        0x03 => "address size fault, level 3",
-        0x04 => "translation fault, level 0",
-        0x05 => "translation fault, level 1",
-        0x06 => "translation fault, level 2",
-        0x07 => "translation fault, level 3",
-        0x09 => "access flag fault, level 1",
-        0x0a => "access flag fault, level 2",
-        0x0b => "access flag fault, level 3",
-        0x0d => "permission fault, level 1",
-        0x0e => "permission fault, level 2",
-        0x0f => "permission fault, level 3",
-        0x10 => "synchronous external abort",
-        0x11 => "synchronous tag check fault",
-        0x13..=0x17 => "synchronous external abort on table walk",
-        0x18 => "synchronous parity/ECC error",
-        0x1b..=0x1f => "synchronous parity/ECC error on table walk",
-        0x21 => "alignment fault",
-        0x30 => "TLB conflict abort",
-        0x31 => "unsupported atomic hardware update fault",
-        0x35 => "unsupported exclusive or atomic access",
-        _ => "other/unknown fault status",
-    }
+    rpikit::esr::fault_status(fsc)
 }
 
 pub(crate) fn ec_name(ec: u64) -> &'static str {
-    match ec {
-        EC_UNKNOWN => "unknown reason",
-        0x01 => "trapped WFI/WFE",
-        0x07 => "trapped FP/SIMD access",
-        0x0e => "illegal execution state",
-        EC_SVC64 => "SVC (AArch64)",
-        0x16 => "HVC (AArch64)",
-        0x17 => "SMC (AArch64)",
-        0x18 => "trapped system register / MSR / MRS",
-        0x19 => "trapped SVE access",
-        EC_IABT_LOWER => "instruction abort, lower EL",
-        EC_IABT_SAME => "instruction abort, same EL",
-        0x22 => "PC alignment fault",
-        EC_DABT_LOWER => "data abort, lower EL",
-        EC_DABT_SAME => "data abort, same EL",
-        0x26 => "SP alignment fault",
-        0x2c => "trapped FP exception",
-        0x2f => "SError",
-        0x30 => "breakpoint, lower EL",
-        0x31 => "breakpoint, same EL",
-        0x32 => "software step, lower EL",
-        0x33 => "software step, same EL",
-        0x34 => "watchpoint, lower EL",
-        0x35 => "watchpoint, same EL",
-        EC_BRK64 => "BRK (AArch64)",
-        _ => "other",
-    }
+    rpikit::esr::ec_name(ec)
 }
 
 /// One-line decode of an SPSR value; the returned `Display` avoids needing an allocator.

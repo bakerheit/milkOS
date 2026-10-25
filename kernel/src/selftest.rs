@@ -196,6 +196,18 @@ pub fn crash_if_asked(stage: &str) {
         }
         return;
     }
+    // `serror` / `dabt` (at the early point): the exception dump instead of a panic, for the Pi's qemu test.
+    // `serror` runs a fake SError through the real crash path (qemu cannot raise one); `dabt` is a real data
+    // abort, a store to an address nothing maps, right after a checkpoint.
+    if stage == "early" && want == b"serror" {
+        crate::serror::checkpoint("crashtest-before");
+        crate::serror::simulate();
+    }
+    if stage == "early" && want == b"dabt" {
+        crate::serror::checkpoint("crashtest-dabt");
+        // SAFETY: deliberately not: nothing maps this address, the store takes a translation fault at EL1.
+        unsafe { core::ptr::write_volatile(0xffff_f000_dead_0010 as *mut u32, 0x600d_f00d) };
+    }
     if want != stage.as_bytes() {
         return;
     }

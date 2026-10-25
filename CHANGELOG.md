@@ -13,6 +13,19 @@
   (`lcd: N panel update(s) from the log were dropped so far`), and nothing at all once the panel's thread runs. Time-budget logic (`rpikit::lcdbudget`) is
   host tested with a fake clock, including a stalled bus; the new `pi-lcd-late-test` boots with the probe and checks the boot reaches the desktop, the LED
   stages and the saved log before the probe's first set-up, and boots with a budget that cannot be met.
+- Crashes on the Pi say much more, and an SError (asynchronous bus error) can be traced to the code that caused it (docs/raspberry-pi.md, "Reading a crash").
+  Every exception dump prints ESR_EL1 in full and decoded (exception class, IL, the abort's fault status, read or write, table-walk, external-abort and
+  valid-syndrome fields, an SError's IDS / IESB / AET / EA / DFSC), FAR_EL1, ELR_EL1, SPSR_EL1, SCTLR_EL1, the pending-interrupt bits (ISR_EL1), the RAS level and,
+  on a CPU with RAS, the error records; it ends with a short summary, because the crash screen shows the end of the log. `serror::checkpoint(label)` (`dsb`,
+  unmask SError, `isb`, mask) is called after every driver init step, after the mailbox calls, after each log flush to the card, in the Ethernet
+  poll and network threads, at the start of every user thread and once a second on every CPU from the timer tick, so a pending SError is taken in EL1 and
+  the dump names the checkpoint it was taken at and the last one that passed before it: the access happened between the two. The Pi drivers' register
+  accessors also keep a per-CPU ring of the last 8 device writes, printed with the block names. `milk.serror=trace` (default on the Pi) / `paranoid` (a checkpoint after every register write: pins the SError to one register) / `off`;
+  `milk.crashtest=serror` / `dabt` exercise the dump. The decode is `rpikit::esr` (host tests: table of known values, fuzz) and `rpikit::soc`;
+  `pi-qemu-test` boots 16 to 18 check the dump's fields, the checkpoint attribution and the breadcrumbs.
+- Ethernet: the boot log says `eth0: genet` (it said `virtio slot 0`); the poll thread logs a status line every 10 s (link, PHY status register, frames sent and received,
+  drops, ring indexes, interrupts) so a log shows whether the controller works at all; frames are no longer queued while the link is down; the DMA buffers' bus
+  addresses are logged and checked against the DMA limit. The device tree dump in the log is no longer cut off at 150 lines and now includes `dma-ranges`.
 - The kernel saves its boot log into a file on the SD card, for a board with no serial cable and no working screen: put the blank `MILKLOG.TXT`
   (`scripts/pi-bootdir.sh` or `scripts/pi-logfile.sh` makes it) on the FAT boot partition, boot, wait for the ACT LED's "log saved" signal (two blinks and a
   pause), read it on the Mac with `scripts/pi-readlog.sh`. The kernel never creates a file or changes the FAT or a directory: it overwrites the data sectors of

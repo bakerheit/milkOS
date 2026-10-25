@@ -1965,3 +1965,212 @@ fn a_mailbox_reply_is_matched_by_channel_and_buffer_not_by_alias() {
         assert_eq!(mailbox::bus_to_phys(a | 0x12_3450), 0x12_3450);
     }
 }
+
+#[cfg(test)]
+mod esr_tests {
+    use crate::esr::*;
+    use std::format;
+    use std::string::{String, ToString};
+
+    fn dec(esr: u64, far: u64, ras: bool) -> String {
+        Decode { esr, far, ras }.to_string()
+    }
+
+    /// xorshift64: the same numbers every run.
+    fn rng(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    #[test]
+    fn exception_classes_by_name() {
+        // The values the kernel and the LED codes talk about.
+        for (ec, name) in [
+            (0x00, "unknown reason"),
+            (0x15, "SVC (AArch64)"),
+            (0x18, "trapped system register / MSR / MRS"),
+            (0x20, "instruction abort, lower EL"),
+            (0x21, "instruction abort, same EL"),
+            (0x22, "PC alignment fault"),
+            (0x24, "data abort, lower EL"),
+            (0x25, "data abort, same EL"),
+            (0x26, "SP alignment fault"),
+            (0x2f, "SError"),
+            (0x3c, "BRK (AArch64)"),
+            (0x3e, "other"),
+        ] {
+            assert_eq!(ec_name(ec), name, "EC {ec:#x}");
+        }
+    }
+
+    #[test]
+    fn fields_of_an_esr() {
+        let esr = 0x96000045u64; // data abort, same EL... bit 31..26 = 100101
+        assert_eq!(ec(esr), 0x25);
+        assert_eq!(iss(esr), 0x45);
+        assert_eq!(ec(0xbf00_0000), 0x2f);
+        assert_eq!(iss(0xffff_ffff), 0x01ff_ffff);
+    }
+
+    #[test]
+    fn a_translation_fault_on_a_write() {
+        // EC 0x25, IL 1, DFSC 0x07 (translation, level 3), WnR 1.
+        let esr = 0x25 << 26 | 1 << 25 | 1 << 6 | 0x07;
+        let s = dec(esr, 0xdead_beef_0000, true);
+        assert!(s.contains("EC=0x25 (data abort, same EL) IL=1"), "{s}");
+        assert!(s.contains("translation fault, level 3 on write"), "{s}");
+        assert!(s.contains("DFSC=0x07 WnR=1 CM=0 S1PTW=0 EA=0 FnV=0"), "{s}");
+        assert!(s.contains("FAR_EL1 = 0x0000deadbeef0000  (address accessed)"), "{s}");
+        assert!(!s.contains("ISV=1"), "{s}");
+    }
+
+    #[test]
+    fn a_data_abort_with_a_valid_syndrome_names_size_and_register() {
+        // ISV, SAS = 2 (4 bytes), SRT = x9, SF = 0, WnR = 1, DFSC = 0x10 (synchronous external abort), EA.
+        let iss = 1 << 24 | 2 << 22 | 9 << 16 | 1 << 9 | 1 << 6 | 0x10;
+        let s = dec(0x25 << 26 | 1 << 25 | iss, 0xfd58_0000, false);
+        assert!(s.contains("synchronous external abort on write"), "{s}");
+        assert!(s.contains("ISV=1: 4 byte(s), register 9, 32-bit"), "{s}");
+        assert!(s.contains("the external bus answered with an error"), "{s}");
+        // A 64-bit load into x30 of 8 bytes.
+        let iss = 1 << 24 | 3 << 22 | 30 << 16 | 1 << 15 | 0x04;
+        let s = dec(0x24 << 26 | 1 << 25 | iss, 0x10, false);
+        assert!(s.contains("data abort, lower EL"), "{s}");
+        assert!(s.contains("translation fault, level 0 on read"), "{s}");
+        assert!(s.contains("8 byte(s), register 30, 64-bit"), "{s}");
+    }
+
+    #[test]
+    fn far_not_valid_and_cache_maintenance_and_table_walk() {
+        let iss = 1 << 10 | 1 << 8 | 1 << 7 | 0x0d;
+        let s = dec(0x25 << 26 | iss, 0x1234, false);
+        assert!(s.contains("permission fault, level 1 on cache maintenance (stage 1 table walk)"), "{s}");
+        assert!(s.contains("FAR_EL1 = not valid"), "{s}");
+        assert!(!s.contains("0x1234"), "{s}");
+    }
+
+    #[test]
+    fn an_instruction_abort() {
+        let s = dec(0x21 << 26 | 1 << 25 | 0x0f, 0xffff_0000_0008_0000, false);
+        assert!(s.contains("instruction abort: permission fault, level 3"), "{s}");
+        assert!(s.contains("IFSC=0x0f S1PTW=0 EA=0 FnV=0"), "{s}");
+        assert!(s.contains("FAR_EL1 = 0xffff000000080000  (address fetched)"), "{s}");
+        let s = dec(0x20 << 26 | 1 << 10 | 0x04, 0, false);
+        assert!(s.contains("FAR_EL1 = not valid"), "{s}");
+    }
+
+    #[test]
+    fn an_serror_without_ras_and_with_it() {
+        // The brief's case: lower EL SError, empty syndrome.
+        let s = dec(serror_esr(0), 0, false);
+        assert!(s.contains("ESR_EL1 = 0xbe000000  EC=0x2f (SError) IL=1 ISS=0x0000000"), "{s}");
+        assert!(s.contains("asynchronous external abort; ELR_EL1 is where the CPU was"), "{s}");
+        assert!(s.contains("IDS=0 IESB=0 AET=0 (uncontainable) EA=0 DFSC=0x00 (uncategorized)"), "{s}");
+        assert!(s.contains("no RAS extension"), "{s}");
+        assert!(s.contains("empty syndrome"), "{s}");
+        // With RAS: AET = recoverable (3), EA, DFSC = asynchronous SError (0x11), IESB.
+        let iss = 1 << 13 | 3 << 10 | 1 << 9 | 0x11;
+        let s = dec(serror_esr(iss), 0, true);
+        assert!(s.contains("IDS=0 IESB=1 AET=3 (recoverable state) EA=1 DFSC=0x11 (asynchronous SError interrupt)"), "{s}");
+        assert!(!s.contains("no RAS"), "{s}");
+        assert!(!s.contains("empty syndrome"), "{s}");
+        // IDS = 1: implementation defined.
+        let s = dec(serror_esr(1 << 24 | 0x12_3456), 0, false);
+        assert!(s.contains("IDS=1: ISS[23:0] = 0x123456 is implementation defined"), "{s}");
+        assert!(!s.contains("AET="), "{s}");
+    }
+
+    #[test]
+    fn aet_and_dfsc_names() {
+        assert_eq!(serror_aet(0), "uncontainable");
+        assert_eq!(serror_aet(1), "unrecoverable state");
+        assert_eq!(serror_aet(2), "restartable state");
+        assert_eq!(serror_aet(3), "recoverable state");
+        assert_eq!(serror_aet(6), "corrected");
+        assert_eq!(serror_aet(4), "reserved");
+        assert_eq!(serror_dfsc(0x11), "asynchronous SError interrupt");
+        assert_eq!(serror_dfsc(0), "uncategorized");
+        assert_eq!(serror_dfsc(0x3f), "reserved");
+    }
+
+    #[test]
+    fn immediates_and_system_registers() {
+        let s = dec(0x15 << 26 | 1 << 25 | 0x1234, 0, false);
+        assert!(s.contains("SVC (AArch64)") && s.contains("immediate = 0x1234"), "{s}");
+        let s = dec(0x3c << 26 | 1 << 25 | 0x5e1f, 0, false);
+        assert!(s.contains("immediate = 0x5e1f"), "{s}");
+        // MRS x3, ID_AA64PFR0_EL1 = S3_0_C0_C4_0: op0 3, op1 0, CRn 0, CRm 4, op2 0, Rt 3, read.
+        let iss = 3 << 20 | 3 << 5 | 4 << 1 | 1;
+        let s = dec(0x18 << 26 | 1 << 25 | iss, 0, false);
+        assert!(s.contains("MRS S3_0_C0_C4_0 x3"), "{s}");
+    }
+
+    #[test]
+    fn ras_levels_and_pending_bits() {
+        assert_eq!(pfr0_ras(0x2222), 0);
+        assert_eq!(ras_name(pfr0_ras(0x2222)), "none");
+        assert_eq!(pfr0_ras(0x1000_2222), 1);
+        assert_eq!(ras_name(1), "RAS");
+        assert_eq!(ras_name(2), "RAS + RASv1p1");
+        assert_eq!(isr_pending(0).to_string(), "none");
+        assert_eq!(isr_pending(1 << 8).to_string(), "SError");
+        assert_eq!(isr_pending(1 << 8 | 1 << 7).to_string(), "SError IRQ");
+        assert_eq!(isr_pending(0xc0 | 1 << 8).to_string(), "SError IRQ FIQ");
+        assert_eq!(access_size(0), 1);
+        assert_eq!(access_size(3), 8);
+    }
+
+    #[test]
+    fn fuzz_every_esr_decodes_without_panicking_and_names_its_class() {
+        let mut st = 0x9e37_79b9_7f4a_7c15u64;
+        for i in 0..200_000u32 {
+            let esr = if i < 64 { (i as u64) << 26 | rng(&mut st) & 0x03ff_ffff } else { rng(&mut st) & 0xffff_ffff };
+            let far = rng(&mut st);
+            for ras in [false, true] {
+                let s = format!("{}", Decode { esr, far, ras });
+                assert!(s.starts_with("  ESR_EL1 = "), "{s}");
+                assert!(s.contains(&format!("EC={:#04x} ({})", ec(esr), ec_name(ec(esr)))), "{s}");
+                // Every line is indented, short enough for a 3.5 inch panel's console plus its indent, and no
+                // line is empty.
+                for l in s.lines() {
+                    assert!(l.starts_with("  ") && l.len() > 3 && l.len() < 100, "{l:?}");
+                }
+            }
+            // All 64 fault status codes have some name; never empty.
+            assert!(!fault_status(esr & 0x3f).is_empty());
+        }
+    }
+
+    #[test]
+    fn a_table_of_known_dumps() {
+        // (esr, far, expected first line) captured from the shapes the kernel prints.
+        let table: [(u64, &str); 4] = [
+            (0x9600_0045, "  ESR_EL1 = 0x96000045  EC=0x25 (data abort, same EL) IL=1 ISS=0x0000045"),
+            (0x8200_000f, "  ESR_EL1 = 0x8200000f  EC=0x20 (instruction abort, lower EL) IL=1 ISS=0x000000f"),
+            (0xbe00_0000, "  ESR_EL1 = 0xbe000000  EC=0x2f (SError) IL=1 ISS=0x0000000"),
+            (0x5600_0001, "  ESR_EL1 = 0x56000001  EC=0x15 (SVC (AArch64)) IL=1 ISS=0x0000001"),
+        ];
+        for (esr, first) in table {
+            let s = dec(esr, 0, false);
+            assert_eq!(s.lines().next().unwrap(), first);
+        }
+    }
+}
+
+#[test]
+fn soc_blocks_are_named_by_address_and_do_not_overlap() {
+    use crate::soc::{BLOCKS, block};
+    assert_eq!(block(0xfd58_0014), Some(("genet", 0x14)));
+    assert_eq!(block(0xfe34_0034), Some(("emmc2", 0x34)));
+    assert_eq!(block(0xfe10_4024), Some(("rng200", 0x24)));
+    assert_eq!(block(0xfe20_0020), Some(("gpio", 0x20)));
+    assert_eq!(block(0xfe00_b890), Some(("mailbox", 0x10)));
+    assert_eq!(block(0xff84_1104), Some(("gic-dist", 0x104)));
+    assert_eq!(block(0x8000_0000), None);
+    assert_eq!(block(0xfe34_0100), None);
+    for w in BLOCKS.windows(2) {
+        assert!(w[0].0 + w[0].1 <= w[1].0, "{:?} overlaps {:?}", w[0], w[1]);
+    }
+}

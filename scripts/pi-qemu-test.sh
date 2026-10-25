@@ -326,33 +326,34 @@ check 'wm: desktop up' "boot 12: the desktop comes up anyway"
 python3 scripts/pi_dtb.py "$T/lcd.dtb" --cmdline "milk.lcd=probe milk.lcd_probe_rounds=1 milk.lcd_probe_ms=50"
 boot 14 "wait@600:wm: desktop up" "wait@600:lcd: probe finished"
 stop
-check '^lcd: probe: 21 set-ups from 1 of 21, 1 round\(s\), text card 50 ms, number card 50 ms, colour flashes 20 ms, pin sweeps on \(D/C GPIO24 reset GPIO25 .*SPI core clock [0-9]+ MHz, (from the firmware|fallback, no firmware answer)\)' "boot 14: probe mode starts, says the clock and where it came from"
-N=$(tr -d '\r' < "$LOG" | grep -Eac '^lcd: probe [0-9]+/21 [a-z0-9]+ [0-9]+ MHz mode [03] DC[0-9]+ RST[0-9]+: start ')
-[ "$N" = 21 ] && ok "boot 14: all 21 set-ups started ($N lines)" || bad "boot 14: $N set-up start lines, expected 21"
-N=$(tr -d '\r' < "$LOG" | grep -Eac '^lcd: probe [0-9]+/21 [a-z0-9]+ [0-9]+ MHz mode [03] DC[0-9]+ RST[0-9]+: done in [0-9]+ ms \(text card [0-9]+ bytes in [0-9]+ ms')
-[ "$N" = 21 ] && ok "boot 14: all 21 set-ups ran through (init, number card, flashes, text card: $N done lines)" || bad "boot 14: $N done lines, expected 21"
-check '^lcd: probe 1/21 ili9486 4 MHz mode 0 DC24 RST25: start \(round 1/1\): milk.lcd=ili9486 milk.lcd_hz=4000000; SPI mode 0 divider [0-9]+ = [0-9]+ kHz of core [0-9]+ MHz \(' "boot 14: the first set-up, with its divider and clock"
-check '^lcd: probe 10/21 st7789 4 MHz mode 0 DC24 RST25: start ' "boot 14: the tenth: the last controller at the slow clock"
-check '^lcd: probe 14/21 ili9486 32 MHz mode 0 ' "boot 14: a 32 MHz set-up"
-check '^lcd: probe 15/21 ili9486 4 MHz mode 3 DC24 RST25: start .*milk.lcd_spi_mode=3' "boot 14: an SPI mode 3 set-up"
-check '^lcd: probe 18/21 ili9486 4 MHz mode 0 DC22 RST27: start .*milk.lcd_dc=22 milk.lcd_rst=27;.*backlight high: GPIO18$' "boot 14: other pins (27 is the reset, so only 18 is the backlight)"
-check '^lcd: probe 21/21 ili9486p 4 MHz mode 0 DC25 RST24: start .*milk.lcd_dc=25 milk.lcd_rst=24' "boot 14: the last set-up"
-check '^lcd: probe 1/21 .*backlight high: GPIO18 GPIO27$' "boot 14: the free backlight pins are driven high"
-check '^lcd: probe finished in [0-9]+ ms: 21 set-up\(s\) shown, 0 skipped' "boot 14: probe ends, nothing skipped"
-has 'lcd: probe [0-9]+/21 .*: skipped after|lcd: .*timed out' && bad "boot 14: a set-up was skipped or timed out" || ok "boot 14: nothing skipped, no SPI time-out"
+check '^lcd: probe: 22 set-ups from 1 of 22, 1 round\(s\), text card 50 ms, number card 50 ms, colour flashes 20 ms, pin sweeps on \(D/C GPIO24 reset GPIO25 .*SPI core clock [0-9]+ MHz, (from the firmware|fallback, no firmware answer)\)' "boot 14: probe mode starts, says the clock and where it came from"
+N=$(tr -d '\r' < "$LOG" | grep -Eac '^lcd: probe [0-9]+/22 [a-z0-9]+ [0-9]+ MHz mode [03] DC[0-9]+ RST[0-9]+: start ')
+[ "$N" = 22 ] && ok "boot 14: all 22 set-ups started ($N lines)" || bad "boot 14: $N set-up start lines, expected 22"
+N=$(tr -d '\r' < "$LOG" | grep -Eac '^lcd: probe [0-9]+/22 [a-z0-9]+ [0-9]+ MHz mode [03] DC[0-9]+ RST[0-9]+: done in [0-9]+ ms \(text card [0-9]+ bytes in [0-9]+ ms')
+[ "$N" = 22 ] && ok "boot 14: all 22 set-ups ran through (init, number card, flashes, text card: $N done lines)" || bad "boot 14: $N done lines, expected 22"
+check '^lcd: probe 1/22 st7796 4 MHz mode 0 DC24 RST25: start \(round 1/1\): milk.lcd=st7796 milk.lcd_hz=4000000; SPI mode 0 divider [0-9]+ = [0-9]+ kHz of core [0-9]+ MHz \(' "boot 14: the first set-up (the 4-inch kits' ST7796S), with its divider and clock"
+check '^lcd: probe 2/22 st7796 16 MHz mode 0 DC24 RST25: start ' "boot 14: the second: the same chip at 16 MHz"
+check '^lcd: probe 11/22 st7789 4 MHz mode 0 DC24 RST25: start ' "boot 14: the eleventh: the last controller at the slow clock"
+check '^lcd: probe 15/22 ili9486 32 MHz mode 0 ' "boot 14: a 32 MHz set-up"
+check '^lcd: probe 16/22 ili9486 4 MHz mode 3 DC24 RST25: start .*milk.lcd_spi_mode=3' "boot 14: an SPI mode 3 set-up"
+check '^lcd: probe 19/22 ili9486 4 MHz mode 0 DC22 RST27: start .*milk.lcd_dc=22 milk.lcd_rst=27;.*backlight high: GPIO18$' "boot 14: other pins (27 is the reset, so only 18 is the backlight)"
+check '^lcd: probe 22/22 ili9486p 4 MHz mode 0 DC25 RST24: start .*milk.lcd_dc=25 milk.lcd_rst=24' "boot 14: the last set-up"
+check '^lcd: probe 1/22 .*backlight high: GPIO18 GPIO27$' "boot 14: the free backlight pins are driven high"
+check '^lcd: probe finished in [0-9]+ ms: 22 set-up(s) shown, 0 skipped' "boot 14: probe ends, nothing skipped"
+has 'lcd: probe [0-9]+/22 .*: skipped after|lcd: .*timed out' && bad "boot 14: a set-up was skipped or timed out" || ok "boot 14: nothing skipped, no SPI time-out"
 has '^lcd: panel initialised' && bad "boot 14: a panel was left running" || ok "boot 14: no panel after the probe"
 has 'KERNEL PANIC|kernel panic' && bad "boot 14: a kernel panic" || ok "boot 14: no panic"
 check 'wm: desktop up' "boot 14: the boot goes on after the probe"
 
 # ---- boot 15: the probe's own options: start at set-up 15, the pin sweeps off (no pin round, no backlight pins), three rounds' worth of nothing else ----
-python3 scripts/pi_dtb.py "$T/lcd.dtb" --cmdline "milk.lcd=probe milk.lcd_probe_ms=50 milk.lcd_probe_from=15 milk.lcd_probe_pins=0 milk.lcd_spi_mode=7"
+python3 scripts/pi_dtb.py "$T/lcd.dtb" --cmdline "milk.lcd=probe milk.lcd_probe_ms=50 milk.lcd_probe_from=16 milk.lcd_probe_pins=0 milk.lcd_spi_mode=7"
 boot 15 "wait@300:wm: desktop up" "wait@300:lcd: probe finished"
 stop
-check '^lcd: probe: 3 set-ups from 15 of 17, 1 round\(s\), .*pin sweeps off ' "boot 15: from=15 with the pin round left out leaves three set-ups"
+check '^lcd: probe: 3 set-ups from 16 of 18, 1 round\(s\), .*pin sweeps off ' "boot 15: from=16 with the pin round left out leaves three set-ups"
 check '^lcd: milk.lcd_spi_mode must be 0, 1, 2 or 3, using 0' "boot 15: a bad SPI mode is refused"
-N=$(tr -d '\r' < "$LOG" | grep -Eac '^lcd: probe [0-9]+/17 .*: start ')
+N=$(tr -d '\r' < "$LOG" | grep -Eac '^lcd: probe [0-9]+/18 .*: start ')
 [ "$N" = 3 ] && ok "boot 15: three set-ups ran" || bad "boot 15: $N set-ups ran, expected 3"
-check '^lcd: probe 15/17 ili9486 4 MHz mode 3 DC24 RST25: start .*backlight high: none by the probe' "boot 15: with the sweeps off the probe drives no backlight pin"
+check '^lcd: probe 16/18 ili9486 4 MHz mode 3 DC24 RST25: start .*backlight high: none by the probe' "boot 15: with the sweeps off the probe drives no backlight pin"
 check '^lcd: probe finished in [0-9]+ ms: 3 set-up\(s\) shown, 0 skipped' "boot 15: probe ends"
 check 'wm: desktop up' "boot 15: the boot goes on after the probe"
 

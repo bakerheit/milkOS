@@ -1177,20 +1177,32 @@ mod probe {
                 assert_ne!(s, t);
             }
         }
-        // Every controller is tried first at the slow clock, SPI mode 0, default pins, before any
-        // fast clock, mode 3 or other pins; and in the order of the controller list.
-        let first_fast = SETUPS.iter().position(|s| !s.is_slow()).unwrap();
-        let slow_first: Vec<Controller> = SETUPS[..lcd::CONTROLLERS.len()].iter().map(|s| s.controller).collect();
-        assert_eq!(slow_first, lcd::CONTROLLERS);
-        assert!(first_fast >= lcd::CONTROLLERS.len());
-        for s in &SETUPS[..lcd::CONTROLLERS.len()] {
-            assert_eq!((s.hz, s.mode, s.pins), (lcdprobe::MHZ4, 0, None), "{s:?}");
+        // The common 4-inch kit's chip first: st7796 at 4 MHz, then at 16 MHz, then ili9488, ili9486p, ili9486
+        // (all SPI mode 0, default pins).
+        let first: Vec<(Controller, u32)> = SETUPS[..5].iter().map(|s| (s.controller, s.hz)).collect();
+        assert_eq!(
+            first,
+            [
+                (Controller::St7796, lcdprobe::MHZ4),
+                (Controller::St7796, lcdprobe::MHZ16),
+                (Controller::Ili9488, lcdprobe::MHZ4),
+                (Controller::Ili9486P, lcdprobe::MHZ4),
+                (Controller::Ili9486, lcdprobe::MHZ4),
+            ]
+        );
+        assert!(SETUPS[..5].iter().all(|s| s.mode == 0 && s.pins.is_none()));
+        // Every controller is tried at the slow clock, SPI mode 0, default pins, before any other fast
+        // clock, mode 3 or other pins.
+        let first_other = SETUPS.iter().position(|s| s.mode != 0 || s.pins.is_some() || s.hz > lcdprobe::MHZ4 && s.controller != Controller::St7796).unwrap();
+        for c in lcd::CONTROLLERS {
+            let at = SETUPS.iter().position(|s| s.controller == c && s.hz == lcdprobe::MHZ4 && s.mode == 0 && s.pins.is_none());
+            assert!(at.is_some_and(|i| i < first_other), "{c:?} at {at:?}, first other {first_other}");
         }
-        // The fast clocks only for the likeliest three controllers.
+        // The fast clocks only for the likeliest four controllers.
         let mut fast: Vec<Controller> = SETUPS.iter().filter(|s| s.hz > lcdprobe::MHZ4).map(|s| s.controller).collect();
         fast.sort_by_key(|c| c.name());
         fast.dedup();
-        assert!(fast.len() <= 3, "{fast:?}");
+        assert!(fast.len() <= 4, "{fast:?}");
         // SPI modes 0 and 3 only; clocks 4, 16, 32 MHz only.
         assert!(SETUPS.iter().all(|s| s.mode == 0 || s.mode == 3));
         assert!(SETUPS.iter().any(|s| s.mode == 3));
@@ -1200,7 +1212,7 @@ mod probe {
         // pen line, distinct pins, in the header range, for at most two controllers, slow, mode 0.
         assert!(SETUPS[..SETUPS_WITHOUT_PIN_ROUND].iter().all(|s| s.pins.is_none()));
         assert!(SETUPS[SETUPS_WITHOUT_PIN_ROUND..].iter().all(|s| s.pins.is_some()));
-        assert_eq!(SETUPS_WITHOUT_PIN_ROUND, 17);
+        assert_eq!(SETUPS_WITHOUT_PIN_ROUND, 18);
         let mut pin_ctrls: Vec<Controller> = Vec::new();
         for s in &SETUPS[SETUPS_WITHOUT_PIN_ROUND..] {
             let (dc, rst) = s.pins.unwrap();
@@ -1325,7 +1337,7 @@ mod probe {
         let a = number_card(0).1;
         let b = number_card(12).1;
         assert!((0..320).any(|y| (0..480).any(|x| a.pixel(x, y) != b.pixel(x, y))));
-        let c = NumberCard::new(21, 21, &SETUPS[20], 480, 320);
+        let c = NumberCard::new(22, 22, &SETUPS[21], 480, 320);
         let right = (0..480 - 8).rev().find(|&x| (12..160).any(|y| c.pixel(x, y) == WHITE)).unwrap();
         assert!(right < 480 - 12);
         // Three digits do not overflow either.
@@ -1369,7 +1381,7 @@ mod probe {
         let line = lcdprobe::options(&s, (23, 22));
         assert_eq!(cmdline::number(line.as_str().as_bytes(), "lcd_dc"), Some(23));
         assert_eq!(cmdline::number(line.as_str().as_bytes(), "lcd_rst"), Some(22));
-        let line = lcdprobe::options(&SETUPS[17], (23, 22));
+        let line = lcdprobe::options(&SETUPS[18], (23, 22));
         assert_eq!(cmdline::number(line.as_str().as_bytes(), "lcd_dc"), Some(22), "the set-up's own pins win");
     }
 
@@ -1557,7 +1569,7 @@ mod probe {
         // Two set-ups that differ only in clock, mode or pins send the same bytes (the difference is
         // below the bus), but two controllers never do.
         let stream = |s: &Setup| up(&s.config()).log;
-        assert_eq!(stream(&SETUPS[0]), stream(&SETUPS[10]));
+        assert_eq!(stream(&SETUPS[0]), stream(&SETUPS[1]));
         for (i, a) in SETUPS.iter().enumerate() {
             for b in &SETUPS[i + 1..] {
                 if a.controller != b.controller {

@@ -446,21 +446,21 @@ changed is sent with the next send), and once the panel's own thread runs (after
 
 **Finding the controller (`milk.lcd=probe`).** These kits are write-only over SPI: nothing can be read back, so the kernel cannot
 tell which chip is on the glass, how it is wired, or on which pins. If you do not know (or `milk.lcd=ili9486` only makes the screen
-flicker blue or stay white), put `milk.lcd=probe` in `cmdline.txt` instead and boot. The kernel then goes through **21 set-ups, one after
-another** (about 95 s in all; then no panel is in use; the log says `lcd: probe finished`). **It runs last**: the boot does not wait for it.
+flicker blue or stay white), put `milk.lcd=probe` in `cmdline.txt` instead and boot. The kernel then goes through **22 set-ups, one after
+another** (about 100 s in all; then no panel is in use; the log says `lcd: probe finished`). **It runs last**: the boot does not wait for it.
 At the start of the boot the log only says `lcd: milk.lcd=probe: the probe starts after the boot is over ...` (nothing on the header is
 touched); the ACT LED goes through its stage codes and the screen and the SD log come up as without a display. The probe starts on a
 low-priority thread of its own when the boot is over (`led: done, solid on`, the desktop is up) and the boot log is saved to the card
 (`MILKLOG.TXT`; with no log file on the card, 8 s after the boot is over); the log says `lcd: probe: the boot is over and the log is
-saved ..., starting`, then the `lcd: probe n/21 ...` lines. **What you see on the ACT LED meanwhile** is what you would see without the probe:
+saved ..., starting`, then the `lcd: probe n/22 ...` lines. **What you see on the ACT LED meanwhile** is what you would see without the probe:
 solid on once the boot is done, then the two-blink "log saved" signal; the probe never uses the LED. Do not power off because the panel
 is still busy: the log file on the card already has the whole boot. (A crash during the probe is handled as always, synchronously.)
 Every set-up is reset and initialised afresh and shows, in this order:
 
-1. **The number card** (1 s): the set-up's number, huge, white on black, with `OF 21` and the controller's name under it.
+1. **The number card** (1 s): the set-up's number, huge, white on black, with `OF 22` and the controller's name under it.
 2. **Four colour flashes** (0.4 s each): the whole screen solid red, then green, blue, white.
 3. **The text card** (1 s, plus the time to send it): the controller's name in big letters, the options that select the set-up (in
-   capitals: type them in lower case), `SETUP n OF 21`, the clock, SPI mode and pins, then colour bars and a white border. It fills the
+   capitals: type them in lower case), `SETUP n OF 22`, the clock, SPI mode and pins, then colour bars and a white border. It fills the
    whole addressed area, so whichever way the glass is mounted something shows; every set-up is landscape (rotation 90).
 
 The number card of set-up 14 and the text card of set-up 1, drawn through the panel model (`scripts/lcd-shots.sh`):
@@ -481,19 +481,19 @@ is already the answer (it means the controller works, and the glass is probably 
 
 | n | set-up | n | set-up |
 |---|---|---|---|
-| 1 | `ili9486` 4 MHz mode 0 | 12 | `ili9486p` 16 MHz |
-| 2 | `ili9486p` 4 MHz | 13 | `ili9341` 16 MHz |
-| 3 | `ili9486p18` 4 MHz | 14 | `ili9486` 32 MHz |
-| 4 | `ili9488` 4 MHz | 15 | `ili9486` 4 MHz **mode 3** |
-| 5 | `st7796` 4 MHz | 16 | `ili9486p` 4 MHz mode 3 |
-| 6 | `ili9481` 4 MHz | 17 | `ili9341` 4 MHz mode 3 |
-| 7 | `r61581` 4 MHz | 18 | `ili9486` 4 MHz, **D/C 22 reset 27** |
-| 8 | `hx8357` 4 MHz | 19 | `ili9486` 4 MHz, D/C 25 reset 24 |
-| 9 | `ili9341` 4 MHz | 20 | `ili9486p` 4 MHz, D/C 22 reset 27 |
-| 10 | `st7789` 4 MHz | 21 | `ili9486p` 4 MHz, D/C 25 reset 24 |
-| 11 | `ili9486` 16 MHz | | |
+| 1 | `st7796` 4 MHz mode 0 (the common 4-inch kits: ST7796S, 480x320) | 12 | `ili9486` 16 MHz |
+| 2 | `st7796` 16 MHz | 13 | `ili9486p` 16 MHz |
+| 3 | `ili9488` 4 MHz | 14 | `ili9341` 16 MHz |
+| 4 | `ili9486p` 4 MHz | 15 | `ili9486` 32 MHz |
+| 5 | `ili9486` 4 MHz | 16 | `ili9486` 4 MHz **mode 3** |
+| 6 | `ili9486p18` 4 MHz | 17 | `ili9486p` 4 MHz mode 3 |
+| 7 | `ili9481` 4 MHz | 18 | `ili9341` 4 MHz mode 3 |
+| 8 | `r61581` 4 MHz | 19 | `ili9486` 4 MHz, **D/C 22 reset 27** |
+| 9 | `hx8357` 4 MHz | 20 | `ili9486` 4 MHz, D/C 25 reset 24 |
+| 10 | `ili9341` 4 MHz | 21 | `ili9486p` 4 MHz, D/C 22 reset 27 |
+| 11 | `st7789` 4 MHz | 22 | `ili9486p` 4 MHz, D/C 25 reset 24 |
 
-(Slow clocks first for every controller; the faster ones only for the three likeliest; SPI mode 3 for those three; the other D/C and reset pairs, as a
+(The ST7796S of the common 4-inch kits (Waveshare 4inch RPi LCD (A) style: 480x320, plain 8-bit SPI, XPT2046 touch, D/C 24, reset 25) first, at 4 and 16 MHz, then the next likeliest chips; then the other controllers at the slow clock; the faster clocks only for the likeliest four; SPI mode 3 for three of them; the other D/C and reset pairs, as a
 second round, for the two likeliest controllers. Slow set-ups at 4 MHz cannot send a full screen in 0.4 s (0.6 s for 565, 0.9 s for 18-bit), so a
 colour flash covers the rows that fit, from the top, and the cards take longer to appear. `ili9341` and `st7789` use their own 320x240 area.) Why these: the
 first version of the probe (ILI9486, ILI9488 and ST7796, each at 4 and 16 MHz, SPI mode 0, GPIO 24/25) already showed nothing on one real kit, so the new matrix adds the same chips with plain SPI framing (the
@@ -503,11 +503,11 @@ other common wiring), the other controllers cheap 3.5-inch kits come with, SPI m
 the previous set-up's pair goes back to inputs); SPI0 (GPIO 7-11, ALT0); the touch pen-down line `milk.touch_irq` (GPIO 17) as an input with pull-up; and, as a
 backlight switch, **GPIO 18 and GPIO 27 high** (a kit whose backlight transistor hangs on one of them lights up; they are only outputs into a 3.3 V logic input).
 Not 18 or 27 if a set-up uses it as D/C or reset, and not at all if `milk.lcd_bl=<gpio>` names the backlight pin (that one is driven high instead). They stay high when the probe is
-over. **`milk.lcd_probe_pins=0` turns the pin sweeps off**: no backlight pins driven, and the second round (set-ups 18-21) is left out, 17 set-ups remain.
+over. **`milk.lcd_probe_pins=0` turns the pin sweeps off**: no backlight pins driven, and the second round (set-ups 19-22) is left out, 18 set-ups remain.
 `milk.lcd_probe_from=n` starts at set-up n (to run again just the tail); `milk.lcd_probe_ms=` changes how long a card stays; `milk.lcd_probe_rounds=2` shows the list twice.
 
-**The log.** Each set-up prints `lcd: probe n/21 NAME CLOCK MODE PINS: start (round r/R): <options>; SPI mode m divider d = k kHz of core C MHz (<where the core clock came from>); backlight high: ...`
-when it starts and `lcd: probe n/21 NAME ...: done in T ms (text card B bytes in M ms = K kbit/s measured, D kbit/s from the divider)` when it ends (or `skipped after T
+**The log.** Each set-up prints `lcd: probe n/22 NAME CLOCK MODE PINS: start (round r/R): <options>; SPI mode m divider d = k kHz of core C MHz (<where the core clock came from>); backlight high: ...`
+when it starts and `lcd: probe n/22 NAME ...: done in T ms (text card B bytes in M ms = K kbit/s measured, D kbit/s from the divider)` when it ends (or `skipped after T
 ms, the SPI transfers failed at the <step>`), and `lcd: probe finished in T ms: N set-up(s) shown, S skipped` at the end. The first line says whether the core clock
 came from the firmware or is the 500 MHz fallback (the mailbox did not answer), and the measured kbit/s next to the divider's tells you whether the clock the bus really
 got is lower (a measured rate far below the divider's: the core clock is idling at its low rate, or the CPU is the bottleneck; the picture is only slower then). With a
@@ -574,7 +574,7 @@ the pixel data is plain bytes: `rpikit::lcd` does that framing, the model in the
 
 **On the real board, in this order**: (1) the ACT LED (on while the kernel runs); (2) the panel: the boot log should appear a
 second or two after power-on (a blank white or black panel with the backlight lit means it is not initialised: check the
-wiring, then `milk.lcd=` for the controller (`milk.lcd=probe` tries 21 set-ups: controller, SPI mode, clock, pins), then `milk.lcd_hz=8000000`; garbled or mirrored: `milk.lcd_rot=`, `milk.lcd_madctl=`;
+wiring, then `milk.lcd=` for the controller (`milk.lcd=probe` tries 22 set-ups: controller, SPI mode, clock, pins), then `milk.lcd_hz=8000000`; garbled or mirrored: `milk.lcd_rot=`, `milk.lcd_madctl=`;
 red and blue swapped: `milk.lcd_bgr=0`; inverted colours: `milk.lcd_inv=`); (3) touch: after the desktop appears, a finger should move
 the pointer; if it lands in the wrong place or mirrored, add `milk.touch_cal=ask`, touch the crosses and copy the printed line.
 

@@ -9,3 +9,7 @@ share/*
 
 # Release bundles (scripts/release.sh)
 dist/
+
+# Python bytecode from the helper scripts
+__pycache__/
+*.pyc

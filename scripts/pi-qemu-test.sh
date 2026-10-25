@@ -22,6 +22,12 @@
 #           once it is on; boot 5's crash sees it flash. All boots check the `led: stage N name` lines in order.
 #           (raspi4b has exactly 2 GiB, so a layout above 4 GiB cannot run here: the allocator and
 #           page tables above 4 GiB are tested on qemu virt, scripts/highmem-test.sh.)
+#   boots 8 to 12: the 3.5-inch SPI display (`milk.lcd=...`), against qemu's SPI0 controller with nothing wired to it:
+#           8: panel mirroring an HDMI desktop; 9: the panel as the only screen (`milk.hdmi=off`, 1:1 pan view,
+#           other controller / rotation / pins / polled touch); 10: a crash with the panel on (no stall, HDMI crash
+#           screen as before); 11: bad option values are refused and the defaults used; 12: an unknown controller.
+#           What qemu cannot show: whether any pixel reaches a glass (the host tests of rpikit's panel model prove the
+#           byte stream; the real board is the test of the wiring).
 # Offline, private images in a fresh /tmp folder, the qemu started here killed by PID.
 # TCG (no hvf for raspi), so a boot takes about 10-30 s.
 #
@@ -133,8 +139,8 @@ out system | grep -Eq '^memory +[0-9]+ MB' && ok "system: $(out system | grep '^
 out disks | grep -q 'milkfs.*/Volumes/Milk' && ok "disks lists the card's milkfs" || bad "disks: $(out disks)"
 out "text show /Users/milk/Documents/pi.txt" | grep -q 'hello-from-the-pi' && ok "a file written on the card reads back" || bad "no file: $(out 'text show /Users/milk/Documents/pi.txt')"
 # The screen: 1024x768, with a desktop's worth of colours in it (not black, not one flat colour).
-if [ -s "$T/desktop.png" ] && python3 -I scripts/png_check.py "$T/desktop.png" >/dev/null 2>&1; then
-  python3 -I - "$T/desktop.png" <<'PY' && ok "the screen shows a desktop" || bad "the screen is blank or flat"
+desktop_shot() { # PNG -> 0 if it shows a desktop
+  [ -s "$1" ] && python3 -I scripts/png_check.py "$1" >/dev/null 2>&1 && python3 -I - "$1" <<'PY'
 import struct, sys, zlib
 d = open(sys.argv[1], "rb").read()
 w, h = struct.unpack(">II", d[16:24])
@@ -150,6 +156,9 @@ raw = zlib.decompress(idat)
 colours = len(set(raw[:(1 + w * bpp) * 400]))
 assert colours > 60, colours
 PY
+}
+if [ -s "$T/desktop.png" ]; then
+  desktop_shot "$T/desktop.png" && ok "the screen shows a desktop" || bad "the screen is blank or flat"
 else
   bad "no screendump of the desktop"
 fi
@@ -164,7 +173,7 @@ check '^milkfs: mmcblk0 mounted' "boot 2: the card mounts again"
 
 # ---- boot 3: two RAM banks and a hole ----
 DTB_ARGS=(-device "loader,file=$T/banks.dtb,addr=0x100,force-raw=on")
-SAMPLE=1 boot 3 "wait@300:wm: desktop up" "send:system" "wait:$P"
+SAMPLE=1 boot 3 "wait@300:$P" "seen@300:wm: desktop up" "send:system" "wait:$P"
 sleep 1
 python3 scripts/qmp.py "$QMP" screendump "$T/banks.png" >/dev/null 2>&1 || true
 stop
@@ -230,16 +239,82 @@ stop
 check 'wm: restarting \(power manager, full reset\)' "boot 7: Restart reset the machine"
 [ "$(tr -d '\r' < "$LOG" | grep -ac 'booting\.\.\.')" -ge 2 ] && ok "boot 7: the kernel booted a second time" || bad "boot 7: no second boot"
 
-# ---- boot 8 (only if MILK_REAL_DTB names a device tree from a real board's boot partition: it is not in the repository) ----
+# ---- boots 8 to 12: the 3.5-inch SPI display (docs/raspberry-pi.md). qemu models the SPI0 controller (the bytes
+# go nowhere: no panel, no touch chip is attached), so these boots run the whole driver against nothing: the
+# bring-up, the boot log, the desktop view, the touch polling, the crash screen; none of it may stall or panic. ----
+python3 scripts/pi_dtb.py "$T/lcd.dtb" --cmdline "milk.sdwrite=1 milk.lcd=ili9486"
+DTB_ARGS=(-dtb "$T/lcd.dtb")
+boot 8 "wait@300:wm: desktop up" "send:system" "wait:$P" "send:text show /proc/input" "wait:$P"
+sleep 1
+python3 scripts/qmp.py "$QMP" screendump "$T/lcd8.png" >/dev/null 2>&1 || true
+stop
+check '^lcd: ili9486 480x320 rot 90 bgr, SPI0 CE0 [0-9]+ kHz .*DC=GPIO24 RST=GPIO25, touch XPT2046 on CE1, pen IRQ GPIO17' "boot 8: the panel's options and pins"
+check '^lcd: panel initialised' "boot 8: the panel is brought up"
+check '^lcd: boot log on the panel' "boot 8: the boot log goes to the panel"
+check '^rpi fb: 1024x768x32 pitch 4096 at ' "boot 8: HDMI is still the primary screen"
+check 'lcd: the desktop \(1024x768\) is on the panel 480x320, scaled down' "boot 8: the panel mirrors the desktop"
+check 'lcd: first desktop update on the panel' "boot 8: a desktop update reaches the panel"
+has 'KERNEL PANIC|kernel panic|lcd: .*timed out' && bad "boot 8: a panic or SPI time-out" || ok "boot 8: no panic, no SPI time-out"
+out system | grep -Eq '^CPUs +4' && ok "boot 8: the system runs (system says 4 CPUs)" || bad "boot 8: system: $(out system)"
+# The touch chip is polled all along and nothing is attached: no phantom touch (no pointer move, no button).
+out "text show /proc/input" | tr -d ' ' | grep -Eq '^buttons0$' && out "text show /proc/input" | tr -d ' ' | grep -Eq '^moves0$' && ok "boot 8: touch polling invents no pointer events" || bad "boot 8: /proc/input: $(out 'text show /proc/input' | tr '\n' ' ')"
+desktop_shot "$T/lcd8.png" && ok "boot 8: the HDMI screen shows the desktop" || bad "boot 8: the HDMI screen is blank or flat"
+
+python3 scripts/pi_dtb.py "$T/lcd.dtb" --cmdline "milk.lcd=ili9488 milk.lcd_rot=270 milk.hdmi=off milk.lcd_view=pan milk.touch_irq=-1 milk.lcd_dc=22 milk.lcd_rst=27 milk.lcd_hz=8000000"
+boot 9 "wait@300:wm: desktop up" "send:system" "wait:$P" "send:text show /proc/input" "wait:$P"
+stop
+check '^lcd: ili9488 480x320 rot 270 bgr, SPI0 CE0 [0-9]+ kHz .*DC=GPIO22 RST=GPIO27, touch XPT2046 on CE1, polled' "boot 9: other controller, rotation, pins, polled touch"
+check '^display: the SPI panel is the screen, the desktop draws 1024x768 in RAM' "boot 9: milk.hdmi=off makes the panel the screen"
+has '^rpi fb: ' && bad "boot 9: the HDMI framebuffer was used" || ok "boot 9: no HDMI framebuffer"
+check 'lcd: the desktop \(1024x768\) is on the panel 480x320, 1:1' "boot 9: the desktop runs on the panel, 1:1 view"
+check 'lcd: first desktop update on the panel' "boot 9: a desktop update reaches the panel"
+check 'wm: desktop up' "boot 9: the desktop"
+has 'KERNEL PANIC|kernel panic|lcd: .*timed out' && bad "boot 9: a panic or SPI time-out" || ok "boot 9: no panic, no SPI time-out"
+out system | grep -Eq '^CPUs +4' && ok "boot 9: the system runs on the panel alone" || bad "boot 9: system: $(out system)"
+out "text show /proc/input" | tr -d ' ' | grep -Eq '^buttons0$' && out "text show /proc/input" | tr -d ' ' | grep -Eq '^moves0$' && ok "boot 9: touch polling invents no pointer events" || bad "boot 9: /proc/input: $(out 'text show /proc/input' | tr '\n' ' ')"
+
+python3 scripts/pi_dtb.py "$T/lcd.dtb" --cmdline "milk.lcd=st7796 milk.lcd_rot=0 milk.crashtest=late"
+boot 10 "wait@300:KERNEL PANIC"
+sleep 2
+python3 scripts/qmp.py "$QMP" screendump "$T/lcd10.png" >/dev/null 2>&1 || true
+stop
+check '^lcd: st7796 320x480 rot 0 bgr' "boot 10: portrait st7796"
+check 'lcd: crash screen sent to the panel' "boot 10: the crash screen was drawn on the panel (no stall)"
+if [ -s "$T/lcd10.png" ]; then
+  case "$(pixels "$T/lcd10.png" 1000,750 1010,740)" in
+    "22,21,19 22,21,19") ok "boot 10: the HDMI crash screen is still the text console" ;;
+    *) bad "boot 10: the HDMI screen is not the text console: $(pixels "$T/lcd10.png" 1000,750 1010,740)" ;;
+  esac
+else
+  bad "boot 10: no screendump"
+fi
+
+python3 scripts/pi_dtb.py "$T/lcd.dtb" --cmdline "milk.lcd=ili9486 milk.lcd_dc=99 milk.lcd_rot=45 milk.touch_cal=1,2,3 milk.lcd_hz=0 milk.lcd_madctl=999"
+boot 11 "wait@300:wm: desktop up"
+stop
+check '^lcd: milk.lcd_dc=99 is not a header GPIO' "boot 11: a bad pin is refused, the default used"
+check '^lcd: milk.lcd_rot must be 0, 90, 180 or 270' "boot 11: a bad rotation is refused"
+check '^lcd: milk.touch_cal needs six numbers' "boot 11: a bad calibration is refused"
+check 'DC=GPIO24 ' "boot 11: the default pin was used"
+check 'wm: desktop up' "boot 11: the desktop comes up anyway"
+
+python3 scripts/pi_dtb.py "$T/lcd.dtb" --cmdline "milk.lcd=st7789"
+boot 12 "wait@300:wm: desktop up"
+stop
+check '^lcd: milk.lcd must be ili9486, ili9488 or st7796' "boot 12: an unknown controller is refused"
+has '^lcd: panel initialised' && bad "boot 12: a panel was brought up" || ok "boot 12: no panel"
+check 'wm: desktop up' "boot 12: the desktop comes up anyway"
+
+# ---- boot 13 (only if MILK_REAL_DTB names a device tree from a real board's boot partition: it is not in the repository) ----
 if [ -n "${MILK_REAL_DTB:-}" ] && [ -r "$MILK_REAL_DTB" ]; then
   DTB_ARGS=(-dtb "$MILK_REAL_DTB")
-  boot 8 "wait@300:wm: desktop up"
+  boot 13 "wait@300:wm: desktop up"
   stop
-  check 'platform: Raspberry Pi 4 \(BCM2711\) \(device tree: raspberrypi,4-model-b\)' "boot 8: the real tree is accepted"
-  check '^\[smp\] 4 of 4 CPUs online \(spin table\)' "boot 8: four CPUs from the real tree's spin table"
-  check '\[genet\] no Ethernet controller' "boot 8: nodes qemu switched off are skipped (GENET)"
-  check '\[pcie\] the device tree has no \(enabled\) PCIe' "boot 8: nodes qemu switched off are skipped (PCIe)"
-  has 'KERNEL PANIC|kernel panic' && bad "boot 8: a kernel panic" || ok "boot 8: no panic"
+  check 'platform: Raspberry Pi 4 \(BCM2711\) \(device tree: raspberrypi,4-model-b\)' "boot 13: the real tree is accepted"
+  check '^\[smp\] 4 of 4 CPUs online \(spin table\)' "boot 13: four CPUs from the real tree's spin table"
+  check '\[genet\] no Ethernet controller' "boot 13: nodes qemu switched off are skipped (GENET)"
+  check '\[pcie\] the device tree has no \(enabled\) PCIe' "boot 13: nodes qemu switched off are skipped (PCIe)"
+  has 'KERNEL PANIC|kernel panic' && bad "boot 13: a kernel panic" || ok "boot 13: no panic"
 fi
 
 # After the early panic the screen kept the boot log and the green band over it (not cleared, no splash).

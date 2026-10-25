@@ -20,8 +20,17 @@ const TAIL_BYTES: usize = 12 * 1024;
 pub fn show() -> bool {
     // Keep the compositor from painting over the text.
     crate::wm::FROZEN.store(true, core::sync::atomic::Ordering::SeqCst);
+    // The 3.5-inch SPI panel on the GPIO header, if there is one: the same text on its own console.
+    #[cfg(feature = "raspi")]
+    let lcd = show_on_lcd();
+    #[cfg(not(feature = "raspi"))]
+    let lcd = false;
+    #[cfg(feature = "raspi")]
+    if display::lcd_is_primary() {
+        return lcd;
+    }
     let Some(ptr) = display::framebuffer() else {
-        return false;
+        return lcd;
     };
     if sink::screen_installed() {
         // The boot console has the text already: make sure the last lines are out.
@@ -50,4 +59,22 @@ pub fn show() -> bool {
     console.flush();
     display::sync_panic();
     true
+}
+
+/// The crash screen on the SPI panel: the end of the log (as much as fits: 58 x 18 characters)
+/// and the closing line. Nothing allocates, nothing waits for a lock.
+#[cfg(feature = "raspi")]
+fn show_on_lcd() -> bool {
+    let drawn = crate::rpi::lcd::crash_paint(|console| {
+        klog::tail(TAIL_BYTES, |bytes| {
+            for chunk in bytes.utf8_chunks() {
+                console.write_str(chunk.valid());
+            }
+        });
+        console.write_str("\n\x1b[1;31mmilkOS stopped.\x1b[0m The LED flashes.\n");
+    });
+    if drawn {
+        crate::kprintln!("lcd: crash screen sent to the panel");
+    }
+    drawn
 }

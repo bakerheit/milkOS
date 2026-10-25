@@ -84,6 +84,13 @@ fn bootargs() -> &'static [u8] {
     }
 }
 
+/// The value of the boot option `milk.<name>` on the Pi's command line (None elsewhere, and when
+/// the option is absent). The bytes live in the firmware's device tree, which is never freed.
+#[cfg(feature = "raspi")]
+pub fn option(name: &str) -> Option<&'static [u8]> {
+    rpikit::cmdline::value(bootargs(), name)
+}
+
 /// True if a fw_cfg device is present and supports DMA (the Pi: always, the command line stands
 /// in for it).
 pub fn available() -> bool {

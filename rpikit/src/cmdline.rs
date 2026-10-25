@@ -59,3 +59,23 @@ pub fn value<'a>(line: &'a [u8], name: &str) -> Option<&'a [u8]> {
 pub fn option_name(file: &str) -> Option<&str> {
     file.strip_prefix("opt/milkos/").filter(|n| !n.is_empty())
 }
+
+/// A number option value: decimal (`24`), hexadecimal (`0x36`) or negative decimal (`-1`).
+/// `None` for anything else (empty, junk, overflow).
+pub fn parse_num(v: &[u8]) -> Option<i64> {
+    let s = core::str::from_utf8(v).ok()?.trim();
+    let (neg, s) = match s.strip_prefix('-') {
+        Some(r) => (true, r),
+        None => (false, s),
+    };
+    let n = match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        Some(h) => i64::from_str_radix(h, 16).ok()?,
+        None => s.parse::<i64>().ok()?,
+    };
+    Some(if neg { n.checked_neg()? } else { n })
+}
+
+/// The value of option `milk.<name>` as a number (see [`parse_num`]).
+pub fn number(line: &[u8], name: &str) -> Option<i64> {
+    parse_num(value(line, name)?)
+}

@@ -25,7 +25,8 @@ Files: `kernel/src/platform.rs` (the board table), `kernel/src/el.S` (EL2 to EL1
 | Hardware random generator (RNG200) | **untested** (qemu does not model it); falls back to the jitter-seeded CSPRNG |
 | PCIe root complex + xHCI USB (the VL805: the four USB ports) | the xHCI driver and the HID keyboard/mouse **run** on qemu virt (`usb-test`); the PCIe bring-up of the BCM2711 is **untested** |
 | Ethernet (GENET + BCM54213PE PHY) | **untested**: qemu has no GENET; written from the register layout, logs every step |
-| Wi-Fi (CYW43455 over SDIO), Bluetooth, the touchscreen, audio, the GPU | not started |
+| The 3.5-inch SPI display on the GPIO header and its touch chip (`milk.lcd=`) | the driver, the panel's byte streams and the touch maths are **host-tested against a model of both chips**; the whole driver **runs** on qemu raspi4b against its SPI0 controller with nothing wired to it; **untested on a real panel** (see "3.5-inch SPI display") |
+| Wi-Fi (CYW43455 over SDIO), Bluetooth, the official DSI touchscreen, audio, the GPU | not started |
 
 "Untested" means it compiles, is gated on the device tree saying the hardware exists (qemu's does not,
 so those paths are skipped there) and logs what it reads; the first boot on a real board is its test.
@@ -35,7 +36,7 @@ so those paths are skipped there) and logs what it reads; the first boot on a re
 ```
 scripts/pi-run.sh               # a window (cocoa) and the serial console on this terminal
 scripts/pi-run.sh headless      # serial only
-scripts/pi-qemu-test.sh         # the test: seven boots, see its header (a few minutes)
+scripts/pi-qemu-test.sh         # the test: twelve boots, see its header (a few minutes)
 ```
 
 `-M raspi4b` runs on TCG (`-accel hvf` does not work for the Raspberry Pi machines), so boots take a
@@ -73,6 +74,7 @@ them, so every existing option works unchanged:
 | `milk.disable=pcie,usb,genet,sdhci,rng` | start without a driver that misbehaves on a real board (edit `cmdline.txt`, no rebuild): `pcie` (and with it USB), `usb`, `genet`, `sdhci`, `rng` |
 | `milk.fbscale=N` | magnify the boot log and crash screen font N times (default 1; 2 from 1600 px wide) |
 | `milk.ledcodes=0` | no ACT LED progress codes (the LED just turns on at the start of `kmain`; the `led: stage` log lines stay). Default on; the codes add about 9 s to a boot |
+| `milk.lcd=ili9486` / `ili9488` / `st7796` | the 3.5-inch SPI display on the GPIO header (off without it; many more options: "3.5-inch SPI display") |
 | `milk.crashtest=early` / `late` | panic on purpose right after the display is up / once the desktop has been up 8 s (tests the crash screens); `late-off` / `late-reset`: the desktop's Shut Down / Restart after 5 s (tests the power paths) |
 
 ## Putting it on a card
@@ -87,7 +89,9 @@ a card or a disk.
    what `config.milkos.txt` says: `arm_64bit=1`, `kernel=milkos8.img`, `hdmi_force_hotplug=1`, `max_framebuffers=1`
    and **no `dtoverlay=vc4-kms-v3d`** (milkOS draws on the firmware's framebuffer, not on a KMS display).
    `cmdline.txt` can stay as it is (the kernel only looks at `milk.` words) or be replaced. The card is **read-only** to milkOS unless you add `milk.sdwrite=1` (so booting it cannot damage the other system; with the stock card there is no milkfs partition to write to anyway).
-3. Put the card in a Pi 4 with an HDMI screen. To go back: restore the old `config.txt`.
+3. Put the card in a Pi 4 with an HDMI screen (or, with `milk.lcd=ili9486` in `cmdline.txt`, the 3.5-inch SPI display on the
+   header: "3.5-inch SPI display"). To go back: restore the old `config.txt`. **Boot options live in `cmdline.txt`**: one line, `milk.<name>=<value>` words separated by
+   spaces; to change one, put the card in any computer, edit that line (`cmdline.milkos.txt` from step 1 is a starting point), eject, boot. No rebuild.
 
 The firmware (start4.elf) loads `milkos8.img` at 0x80000, hands over a device tree in `x0` and starts all four cores at EL2 (the
 others wait in the spin table). The card also holds the root file system's persistent part: milkOS finds
@@ -191,6 +195,8 @@ There is no serial cable in this setup, so the kernel makes the screen the conso
    ![crash screen](screenshots/raspberry-pi-crash-screen.png)
 4. **The green ACT LED** is a progress readout you can count with nothing else attached: see the next section.
 5. `milk.crashtest=early|late` triggers a panic on purpose so you can see the screens once.
+6. **No HDMI cable at all?** The 3.5-inch SPI display on the GPIO header gets the same boot log and crash screen
+   (section "3.5-inch SPI display": `milk.lcd=ili9486` in `cmdline.txt`).
 
 **An option for later, not built:** keeping the log on the card. The boot partition is FAT, which the kernel
 can read (`fs/fat.rs`) and could write; a ring of the last log lines flushed to `milkos.log` on it (at a
@@ -247,6 +253,114 @@ firmware stopped before our kernel.
 **Turning it off.** `milk.ledcodes=0` in `cmdline.txt` skips the marker and the bursts (the LED then only turns on at
 `kmain` and goes on flashing after a crash). The codes busy-wait on the CPU's generic counter, so they need no
 allocator, timer interrupt or scheduler; the pattern language itself is `rpikit::ledcode` (host-tested).
+
+## 3.5-inch SPI display
+
+A 480x320 colour TFT with a resistive touch chip that sits on the 40-pin header (the kits sold with an "LCD-show"
+install script for Raspberry Pi OS). On a board with **no HDMI cable and no serial cable** it is the only debug screen,
+so the boot log and the crash screen appear on it, and the desktop runs on it. It is **off unless `milk.lcd=` names its
+controller**: nothing on the header is touched otherwise. Files: `kernel/src/rpi/{spi,lcd}.rs` (SPI0, the pins, the panel as
+a display, the touch thread), `rpikit/src/{lcd,touch}.rs` (everything that can be decided from bytes), `rpikit/src/lcdsim.rs`
+(the model of both chips the host tests run against).
+
+**Wiring assumed** (the usual kit; check the silkscreen, every pin is an option):
+
+| header | GPIO | what | option |
+|---|---|---|---|
+| 19 / 21 / 23 | 10 / 9 / 11 | SPI0 MOSI / MISO / SCLK | fixed (ALT0) |
+| 24 | 8 (CE0) | display chip select | fixed |
+| 26 | 7 (CE1) | touch chip select | fixed |
+| 18 | 24 | display D/C (also called RS) | `milk.lcd_dc=` |
+| 22 | 25 | display reset | `milk.lcd_rst=` |
+| 11 | 17 | touch pen-down line (low while touched) | `milk.touch_irq=` (`-1`: no line, poll) |
+| 1 or 17 / 6 | | 3.3 V (and 5 V) / ground | |
+| | none | backlight: wired on | `milk.lcd_bl=<gpio>` if the kit has a switch |
+
+**Options** (in `cmdline.txt`, one line, space separated; `scripts/pi-bootdir.sh` writes `cmdline.milkos.txt` with
+`milk.lcd=ili9486`; to change one, edit the card's `cmdline.txt` on any computer, no rebuild, and reboot):
+
+| option | default | does |
+|---|---|---|
+| `milk.lcd=` | off | `ili9486` (the Waveshare-35A style kit: 16-bit words through shift registers), `ili9488` (18-bit pixels over plain SPI), `st7796` (RGB565 over plain SPI); `off` |
+| `milk.lcd_rot=` | `90` | `0` portrait 320x480, `90` landscape 480x320 (the kit's usual use), `180`, `270` |
+| `milk.lcd_bgr=` | `1` | the glass's colour order (red and blue swapped on screen: try `0`) |
+| `milk.lcd_inv=` | per controller | display inversion (colours inverted: try the other value; `st7796` modules usually need `1`) |
+| `milk.lcd_madctl=` | from rot/bgr | the raw memory-access byte (`0x28`...), for a glass that comes out mirrored |
+| `milk.lcd_hz=` | `16000000` | SPI bit clock, up to `32000000` (divided down from the *highest* core clock the firmware reports, never faster than asked) |
+| `milk.lcd_dc=` `milk.lcd_rst=` `milk.lcd_bl=` `milk.touch_irq=` | 24, 25, none, 17 | pins, GPIO 2..27 |
+| `milk.touch=0` | on | leave the touch chip alone |
+| `milk.touch_cal=a,b,c,d,e,f` | from `lcd_rot` | calibration: `x = ((a*rx + b*ry) >> 16) + c`, `y = ((d*rx + e*ry) >> 16) + f` from the chip's raw 0..4095 readings (16.16 fixed point, offsets in pixels); `ask` runs the four-cross helper |
+| `milk.lcd_view=` | `fit` | the desktop on the small screen: `fit` shows all of it scaled down (a 1024x768 desktop becomes 426x320, with bars), `pan` shows 480x320 of it 1:1 and moves the view when a finger is held within 24 px of the edge |
+| `milk.hdmi=off` | auto | do not use the firmware's HDMI framebuffer: the desktop draws in RAM and the panel is the screen |
+
+**What it shows**
+
+1. **The boot log**, from the moment SPI0 and the panel are up (right after `mem::init`, before the display layer and
+   everything memory-hungry): the log so far is replayed, then every `kprintln!` line. The text console is the kernel's own
+   (8x16 font, 58 columns by 18 rows) in a static 614 KB RAM picture; because redrawing a scrolled screen would cost
+   150 ms a line at 16 MHz, this console **wraps to the top and overwrites old lines** (a block cursor marks the newest
+   line) instead of scrolling. Only the rows a line changed are sent (two bands of 16 rows, about 15 ms at 16 MHz), at
+   once, outside the print lock and with interrupts as they are, so when the kernel stops the last line it printed is on the
+   panel; the panel's thread catches up on anything the print path could not send (the bus busy, interrupts masked after
+   they were switched on). Boot takes about a second longer for it.
+2. **The crash screen**: a panic or exception paints the end of the kernel log on a plain scrolling console (the last 18
+   lines: the panic message with its source line, or the exception dump) and "milkOS stopped. The LED flashes.". It runs
+   with interrupts off and nothing allocated (a static picture, a stack buffer of 4 KB, bounded SPI waits); if another CPU
+   was in the middle of a transfer the bus is taken over after 30 ms. HDMI shows its own crash screen as before.
+3. **The desktop**, when the window manager starts: a view of whatever framebuffer the desktop draws on (the HDMI one,
+   mirrored; or, with no HDMI framebuffer or `milk.hdmi=off`, a 1024x768 RAM one), sent in the rectangles the compositor
+   reports, in the panel thread (a full frame is about 0.15 s, a mouse-sized update a few ms). **The window
+   manager does not run at 480x320**: its smallest mode is 1024x768 (menu bar, dock, window minimum sizes), so the panel
+   shows that picture through a view: `fit` (everything, scaled with a box filter: icons and window chrome are clear, small
+   text is hard to read) or `pan` (1:1, readable, scroll by holding a finger at an edge). A real 480x320 desktop layout
+   would be a window manager project of its own.
+4. **Touch**: the XPT2046 on chip select 1 at 1 MHz, polled every 10 ms (when the pen-down line is low or a finger is
+   already down; the chip is asked every tenth tick regardless, so a line that is not wired still works, slowly). Five
+   readings of x, y and pressure per poll, rail values and light presses dropped, median of the rest. Two good polls in a
+   row make a touch, three missing ones end it; taps and drags become `input::report_pointer` and left button down/up
+   events, so the existing desktop works with a finger or stylus. `milk.touch_cal=ask` shows four crosses before the desktop
+   starts, fits the six numbers (least squares, four touches) and shows and logs the `milk.touch_cal=...` line to put in
+   `cmdline.txt` in place of `ask`.
+
+**How the panel is driven** (written from the controllers' public datasheets and how such kits are known to behave; no third-party
+code): reset pulse, `SWRESET`, `SLPOUT`, `COLMOD` (0x55: RGB565; the ILI9488 takes 0x66 over SPI: three bytes a pixel),
+power, VCOM and gamma, `MADCTL` from the rotation (0x48, 0x28, 0x88, 0xe8 with BGR; the four are true rotations of each other),
+display on. A window is `CASET` / `PASET` / `RAMWR` and then pixel rows, 2 KB per transfer. **The Waveshare-style kit's controller is on a 16-bit bus
+that SPI feeds through shift registers**, so there every command and every parameter is a 16-bit word (high byte 0) and only
+the pixel data is plain bytes: `rpikit::lcd` does that framing, the model in the tests refuses anything else.
+
+**What is verified, and how**
+
+* Host tests (`scripts/rpikit-test.sh`, 35 new tests in `rpikit/src/lcdtests.rs`): the driver runs byte for byte against a model
+  of the three controllers (graphics memory, address window, MADCTL mirroring, colour format, 16-bit framing, what a viewer
+  sees) and of the touch chip. They check the init streams, the window and pixel bytes, RGB565 and 18-bit packing, all four rotations
+  upright on all three controllers, partial updates sending only their rectangle, failures at every point of the bring-up,
+  dirty-rectangle merging, the desktop's scaling (against a floating-point reference) and panning, the touch command bytes and
+  decoding, the filter, calibration defaults, the least-squares fit, the pointer state machine, and hostile input.
+  Pictures drawn through the model: ![boot log](screenshots/raspberry-pi-lcd-boot-log.png)
+  ![crash screen](screenshots/raspberry-pi-lcd-crash-screen.png)
+  ![desktop, scaled](screenshots/raspberry-pi-lcd-desktop.png) ![desktop, 1:1 panned](screenshots/raspberry-pi-lcd-desktop-pan.png)
+  (`scripts/lcd-shots.sh` regenerates them; the boot log and crash text are drawn by the test with the kernel's
+  font data, the desktop is the qemu screenshot above through the real scaler and panel driver).
+* qemu (`scripts/pi-qemu-test.sh`, boots 8 to 12): qemu's raspi4b has an SPI0 controller and nothing attached to it, so the
+  *kernel's* whole driver runs: probe, pins, bring-up, the boot log, the desktop on the panel (mirrored, and as the only screen with
+  `milk.hdmi=off` and `pan`), touch polling, a crash with the panel on, bad option values and an unknown controller. It proves the
+  boot never stalls or panics with a panel absent, silent or wrong; it **cannot** show a single pixel on a glass.
+* **Untested until a real panel**: the init values (power, VCOM, gamma: a washed-out or dark picture is these), the MADCTL values and
+  the glass's mounting (a mirrored picture: `milk.lcd_rot=`, `milk.lcd_madctl=`), the colour order and inversion, whether the clock
+  is too fast for the kit's wiring (`milk.lcd_hz=8000000`), SPI0's FIFO behaviour at 16 MHz, the touch default calibration (derived from
+  the kit's published numbers; `milk.touch_cal=ask` does not depend on it), the pen-down line's polarity and pull, and the desktop's
+  speed on the wire.
+
+**On the real board, in this order**: (1) the ACT LED (on while the kernel runs); (2) the panel: the boot log should appear a
+second or two after power-on (a blank white or black panel with the backlight lit means it is not initialised: check the
+wiring, then `milk.lcd=` for the controller, then `milk.lcd_hz=8000000`; garbled or mirrored: `milk.lcd_rot=`, `milk.lcd_madctl=`;
+red and blue swapped: `milk.lcd_bgr=0`; inverted colours: `milk.lcd_inv=`); (3) touch: after the desktop appears, a finger should move
+the pointer; if it lands in the wrong place or mirrored, add `milk.touch_cal=ask`, touch the crosses and copy the printed line.
+
+**What to ask the owner**: the exact kit (a photo of the back: the controller name is often printed, "ILI9486", "ILI9488", "ST7796", and
+the touch chip "XPT2046" or "ADS7846"), and whether the pin header silkscreen says GPIO 24 / 25 / 17 for D/C, reset and pen-down
+(the usual) or something else.
 
 ## The drivers
 
@@ -314,18 +428,24 @@ Not done: the address filter, interrupt-driven transmit completion, checksum off
 | device tree parsing, banks and holes, 64-bit physical addresses (on virt) | a 4 GB / 8 GB board's actual tree |
 | xHCI, HID, PCI enumeration (on virt) | the BCM2711 PCIe bring-up, the VL805 itself, USB 3 |
 | the net stack (on virt) | GENET, the PHY, the RGMII timing |
+| the SPI display's driver against qemu's SPI0 controller (nothing attached), its byte streams against a host model | whether a glass shows anything; the touch chip |
 
 ## Known gaps
 
 * No Wi-Fi (the CYW43455 needs an SDIO driver and its firmware blob: `brcmfmac43455-sdio.bin` and the `.txt` NVRAM
   from the Pi OS image, which must not be committed here: load them from the card at run time), no Bluetooth, no
-  touchscreen (the official 7" panel is I2C plus the DSI display through the firmware), no audio (the `bcm2835` PWM/I2S
+  official DSI touchscreen (the 7" panel is I2C plus the DSI display through the firmware; the 3.5-inch SPI kit has a driver, see its section), no audio (the `bcm2835` PWM/I2S
   or HDMI audio), no GPU acceleration (the VideoCore needs a mailbox/firmware protocol milkOS does not speak).
 * The desktop at 1024x768 on a Pi's CPU has not been measured; if it is slow the options are the release build (the default
   for `pi-bootdir.sh`) and a smaller compositor workload.
 * No power button support (the Pi 4 has none; a GPIO button is a few lines on top of `rpi/power.rs`). The desktop's Shut Down and
   Restart use the SoC's power manager (`rpi/power.rs`: a watchdog full reset, with the firmware's halt marker set first for "off", so the board
   stays down until power is cycled); both are tested on qemu (`pi-qemu-test` boots 6 and 7).
+* The SPI display (section "3.5-inch SPI display"): polled PIO only, no DMA (a full frame costs the CPU about as long as the wire: ~0.15 s
+  at 16 MHz, so the desktop on the panel moves at a few frames a second when much changes); the pen-down line is read as a level every
+  10 ms, not taken as a GIC interrupt; no backlight dimming (it is wired on, or `milk.lcd_bl=` switches it on); the panel cannot be
+  read back, so a wrong controller or wiring shows as a wrong picture and not as an error; the desktop is not laid out for 480x320
+  (see there); if the window manager falls back to the text console (out of memory) the panel keeps showing the desktop's last picture.
 * Thermal throttling is not watched (mailbox `GET_TEMPERATURE` exists).
 
 ## Stage 2: what to do with a board, in order

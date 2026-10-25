@@ -10,6 +10,22 @@
   turns the codes off (they add about 9 s to a boot). The pattern language is host-tested (`rpikit::ledcode`);
   `pi-qemu-test` checks the stage order and samples the LED pin (qemu models the GPIO block). How to read it, and
   how to tell it from the firmware's own error flashes, is at the top of "Reading the ACT LED".
+- The 3.5-inch SPI touch display on the 40-pin header (ILI9486 as the Waveshare-style kits wire it, ILI9488, ST7796;
+  `milk.lcd=...` in cmdline.txt, off without it): SPI0 and GPIO driver (`kernel/src/rpi/spi.rs`, polled, every wait
+  bounded), the panel as a second display (`kernel/src/rpi/lcd.rs`). On a board with no HDMI and no serial cable it is
+  the debug screen: the boot log appears as soon as the panel is up (a wrapping 58x18 console, only changed rows sent),
+  the crash screen is drawn with interrupts off and nothing allocated, and the desktop is shown on it (all of it scaled
+  down, or 1:1 with the view following a finger at the edge; `milk.hdmi=off` makes the panel the only screen, drawing
+  the desktop in RAM). Options for the controller, rotation, colour order, inversion, raw memory-access byte, clock
+  (`milk.lcd_hz=`, 16 MHz up to 32) and every pin (`milk.lcd_dc=`, `milk.lcd_rst=`, `milk.lcd_bl=`, `milk.touch_irq=`).
+- Touch: the XPT2046 on SPI chip select 1, five readings median-filtered per poll, pressure threshold, pen-down line or
+  polling, taps and drags as pointer events so the desktop works with a finger or stylus; `milk.touch_cal=a,b,c,d,e,f`
+  and a four-cross helper (`milk.touch_cal=ask`) that prints the line to put in cmdline.txt.
+- `rpikit` gains `lcd` and `touch` (init streams and 16-bit word framing, pixel packing, dirty rectangles, the desktop view,
+  XPT2046 decoding, filter, calibration fit, pointer tracker) with a model of both chips for the host tests (35 new tests,
+  PNG screenshots of the boot log, crash screen and desktop through the model). `pi-qemu-test` gains five boots with the
+  display on (qemu's SPI0 has nothing attached: the driver runs, the boot is never held up); `scripts/pi-bootdir.sh` writes
+  `milk.lcd=ili9486` into `cmdline.milkos.txt`. Untested on a real panel.
 
 ## 0.2.0 (2026-10-24)
 

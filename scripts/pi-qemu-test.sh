@@ -37,7 +37,7 @@
 #           `milk.serror=off` makes the checkpoints no-ops, `milk.serror=paranoid` adds one after every register write; the ESR decode, FAR/ELR/SPSR, the checkpoint attribution and the register write
 #           breadcrumbs are checked in the log, the checkpoint cost is bounded, and boot 1 proves the checkpoints are silent when nothing is pending.
 #   boot 20: `milk.pcie=probe` where the tree has no PCIe controller (qemu's raspi4b has none): acknowledged, skipped cleanly, the desktop runs; `milk.crashtest=serror-absorb` runs the SError-survival rules against pretend SErrors.
-#   boots 21 to 24: the Ethernet link-up options and the watchdog (docs/raspberry-pi.md, "GENET link-up" and "Watchdog"): 21: `milk.genet=nolink,norx,notx,polled`
+#   boots 21 to 24: the Ethernet link-up options and the watchdog (docs/raspberry-pi.md, "GENET link-up" and "Watchdog"): 21: `milk.genet=nolink,norx,notx,polled,txprobe`
 #           with `milk.watchdog=on` where the tree has neither the Ethernet controller nor the power manager's watchdog block: both skipped cleanly,
 #           Shut Down powers the machine off; 22: `milk.watchdog=sim` (the same rules with no register: qemu's power manager resets at once when
 #           RSTC is written instead of counting down, so the real arming cannot run here): armed after the boot, the desktop comes up and runs
@@ -532,13 +532,13 @@ check '^serror: absorb self-test: ok ' "boot 26: an SError is survived at a pcie
 
 # boots 27 to 24: the Ethernet link-up options and the watchdog. qemu's raspi4b has no GENET and the test tree has no watchdog node, so the options
 # must be accepted and the Ethernet skipped, the watchdog must say why it is not armed, and the board must still shut down by itself.
-python3 scripts/pi_dtb.py "$T/wd.dtb" --cmdline "milk.genet=nolink,norx,notx,polled milk.watchdog=on milk.crashtest=late-off"
+python3 scripts/pi_dtb.py "$T/wd.dtb" --cmdline "milk.genet=nolink,norx,notx,polled,txprobe milk.watchdog=on milk.crashtest=late-off"
 DTB_ARGS=(-dtb "$T/wd.dtb")
 boot 27 "wait@300:wm: shutting down"
 gone=0
 for _ in $(seq 100); do kill -0 "$QPID" 2>/dev/null || { gone=1; break; }; sleep 0.2; done
 stop
-check '^\[genet\] no Ethernet controller in the device tree' "boot 27: milk.genet=nolink,norx,notx,polled on a board without GENET: skipped cleanly"
+check '^\[genet\] no Ethernet controller in the device tree' "boot 27: milk.genet=nolink,norx,notx,polled,txprobe on a board without GENET: skipped cleanly"
 check '^\[genet\] milk.genet is set but there is nothing to probe: skipped' "boot 27: said so"
 check '^\[watchdog\] not armed: the device tree has no power manager watchdog' "boot 27: milk.watchdog=on where the tree has no watchdog block: not armed, with the reason"
 has '^\[watchdog\] armed' && bad "boot 27: the watchdog armed itself on a tree without the block (qemu would reset at once)" || ok "boot 27: no watchdog armed"

@@ -78,6 +78,7 @@ them, so every existing option works unchanged:
 | `milk.disable=pcie,usb,genet,sdhci,rng` | start without a driver that misbehaves on a real board (edit `cmdline.txt`, no rebuild): `pcie` (and with it USB), `usb`, `genet`, `sdhci`, `rng` |
 | `milk.genet=probe` | run the Ethernet MAC's bring-up one register access at a time, with an SError checkpoint after each, and log `[genet] probe step N name ok` (or `FAILED`): names the exact access a board refuses (see "GENET bring-up"); it also names every step of the link-up path and the first frames in the log, saving the log to the card first ("GENET link-up") |
 | `milk.genet=nolink` / `norx` / `notx` / `polled` | bisect a freeze when the cable goes in (words can be combined with commas, `probe,norx`): the MAC is never programmed for a link / the receive DMA stays off / the transmit DMA stays off / the interrupt stays masked ("GENET link-up") |
+| `milk.genet=txprobe` | link up with the MAC's transmitter still off and the network stack held back, then one harmless 60-byte broadcast frame (EtherType 0x88b5, no IP) sent by hand with every register access logged and saved first; implies `probe` ("GENET transmit") |
 | `milk.watchdog=on` / `off` / `sim` | the power manager's watchdog as a safety net: armed at the end of the boot, kicked from the timer interrupt, resets a frozen board after 15 s; default on ("Watchdog") |
 | `milk.fbsize=WxH` / `auto` | the framebuffer (and so the desktop) size: `auto` (the default) follows the display mode the firmware has set up (the mailbox's physical size: 800x480 for a panel that takes that mode, 1920x1080 for a television), `WxH` forces a size (640x400 to 4096x2160); 1024x768 when the firmware reports nothing usable ("HDMI displays") |
 | `milk.touch=xpt2046` | the touch chip of an HDMI display, with no SPI panel (`milk.touch_cs=`, `milk.touch_irq=`, `milk.touch_cal=`, `milk.touch_rot=`: "HDMI displays") |
@@ -284,7 +285,7 @@ are `area-step`. Where they are:
 | `mbox-call` | at the end of every mailbox transaction (the firmware wrote into our memory by DMA) |
 | `pcie-<step>`, `pcie-drain`, `pcie-order-<name>`, `pcie-bar-read`, `pcie-park`, `pcie-done`, `pcie-xhci-start`, `pcie-xhci-poll` | the PCIe + VL805 bring-up ("PCIe + USB"): one per step, one before the first (it drains an SError left pending by an earlier access, logs it once and does not count it), one per handshake order, around the first BAR read, the park after a failure, the end, and the xHCI driver's start and polling loop. An SError taken at a `pcie-*` checkpoint (or at any checkpoint of the USB thread during the bring-up) is survived, not fatal |
 | `sdhci-clock` `sdhci-card` | inside the SD driver's init |
-| `genet-buffers` `genet-power-up` `genet-umac-reset` `genet-dma-off` `genet-umac-setup` `genet-rings` `genet-phy` `genet-irq` `genet-dma-on` `genet-link-up` | the sub-steps of the Ethernet MAC's bring-up, in order, and the end of the link-up path (the driver catches an SError at all of them but `genet-buffers`: see "GENET bring-up", "GENET link-up") |
+| `genet-buffers` `genet-power-up` `genet-umac-reset` `genet-dma-off` `genet-umac-setup` `genet-rings` `genet-phy` `genet-irq` `genet-dma-on` `genet-link-up` `genet-txprobe` | the sub-steps of the Ethernet MAC's bring-up, in order, and the end of the link-up path and of the `txprobe` experiment (the driver catches an SError at all of them but `genet-buffers`: see "GENET bring-up", "GENET link-up", "GENET transmit") |
 | `virtio-init` `crypto-init` `irq-enable` `lcd-irqs-live` `memtest` `fs-init` | the rest of the early boot |
 | `sched-init-entry` `sched-init` `smp-init` `audit-journal-sysstat` | around the scheduler, SMP |
 | `smp-cpu-entry` `smp-cpu-up` | on each secondary CPU as it comes up |
@@ -1230,6 +1231,74 @@ An SError during these steps is caught after each of them in probe mode (and at 
 
 The default is the driver in Linux's order. `nolink` is expected to survive (by construction), and of the others, `norx` is expected to be the one that changes the outcome if the hang is a DMA write, `polled` if it is the interrupt; `notx` is the least likely. If
 `norx,notx` survives and each alone does not, both DMA engines are involved (the controller's bus master as a whole: look at the SCB/arbiter side, `DMA_SCB_BURST_SIZE`, the burst length). If everything above freezes at step 4, the MAC's receiver itself (RGMII RXC, the delay mode: `phy-mode rgmii-rxid` in the real tree) is the suspect.
+
+### GENET transmit: the freeze after the first frame
+
+*What the real board showed.* With the cable in and `milk.genet=probe`, the link-up path passes (all seven steps), the first receive interrupt is taken and returns, the CPU reads a received frame's descriptor and buffer, and
+the log has `first-tx-kick` (the first frame is in descriptor 0, transmit producer index 1, consumer 0, `tdma ctrl 0x20001`, `umac cmd 0x1000013b`). Within about a second the board stops (HDMI included, an earlier boot
+without the watchdog showed the panel's no-signal screen) and the 15 s watchdog resets it. Receiving works; the first transmit is the suspect.
+
+*What the files on the card say when read boot by boot* (five boots with the same build): they do **not** all end at the doorbell. One ends after `link-mac-tx-en` (before any frame was queued, 0.1 s after the MAC's transmitter was
+enabled), two end at `first-rx-frame` (the next saved line would have been `first-tx-kick`), and two end at `first-tx-kick` plus the system report a quarter of a second later (the machine was alive after the doorbell
+was rung, at most 10 ms after that line). So the doorbell write itself does not stop the SoC on the spot, and every observed stop is **after the MAC's transmitter was switched on** (`UMAC_CMD.TX_EN`), never before
+it. That fits "anything the MAC transmits" (our frame, but also a pause frame or any other the MAC generates once its transmitter is on) at least as well as "our descriptor/doorbell". It is a reading of timestamps in
+logs that are saved about once a second, not a proof.
+
+*The transmit path reviewed against the public driver's register layout* (nothing copied; written from the register descriptions and checked by host tests, `rpikit::genet` and `rpikit/src/tests.rs`):
+
+| piece | in milkOS | verdict |
+|---|---|---|
+| descriptor word order and size | length/status, address low, address high; 12 bytes; 256 of them in the engine's own memory at `0x4000` | as the controller describes it |
+| default-ring status word | `length<<16 \| 0x3f<<7 (queue tag) \| APPEND_CRC (bit 6) \| SOP (13) \| EOP (14)`; `0x003c7fc0` for 60 bytes | right; frames under 60 bytes are padded to 60 and the length is the padded one |
+| ring registers | read ptr `0x5000`, consumer `0x5008`, producer `0x500c`, size/buffer `0x5010` (`64<<16 \| 2048`), start `0x5014`, end `0x501c`, mbuf threshold `0x5024`, flow period `0x5028` (0 for ring 16), write ptr `0x502c`; high words at +4 | the same offsets and values as the receive ring (host-tested to be twins), each accepted on the board |
+| ring geometry | start 0, end `64*3-1 = 191` words, inside the 256-descriptor memory; the transmit engine has its own memory, so sharing 0..191 with the receive ring is fine | right |
+| engine enable | `ring cfg 0x10000` (ring 16), `ctrl 0x20001` (engine + ring 16's enable, bit 17) | right; read back `0x20001` in the log |
+| doorbell | descriptor words written, `dsb sy`, then the producer index; the descriptors are Device memory written with volatile stores, the frame cleaned out to memory first | right |
+| buffer address | `0x2831000`: below the board's 3 GiB DMA limit, the same identity mapping the receive buffers (`0x2811000`) use and the controller already writes to | right (the tree's `dma-ranges` for the controller's bus are the identity) |
+| 64-byte status block | `TBUF_CTRL = 0`: off, so the buffer is the frame, no status block | consistent; the public driver turns it on, the minimal bare-metal drivers do not |
+| UMAC | `0x1000013b` = TX_EN, RX_EN, speed 1000 (bits 3:2 = 2), promiscuous, pad enable, both pause-ignore bits; max frame 1536; `UMAC_TX_FLUSH` pulsed and left 0 | each bit as intended; no CRC-forward, so the MAC appends the FCS |
+| interrupts | `INTRL2_0` unmasked: `0xe000` = bits 13..15, the **receive** DMA only; the transmit-done bits (16..18) are masked and stay masked | no transmit interrupt can fire, so no unacknowledged level interrupt can follow the first frame |
+
+*Why not an interrupt storm.* The only unmasked sources are the receive ones, the handler clears what it reads, and two receive interrupts were taken and returned before the stop. A storm would starve the CPU but
+leave the display engine scanning out its frame; the earlier boot lost the picture as well (the panel went to its no-signal screen), which points at the SoC's memory/bus fabric, not at the CPU being busy.
+
+*Differences from the public driver that remain* (none can be called the cause; each is listed so that the next log can rule it in or out): the transmit arbiter (`DMA_ARB_CTRL`) and the ring priorities are not written (the controller's
+reset values are used; `txprobe` reads them); the engine's SCB burst size is written `0x10` for both engines (the public sources are not unanimous in my memory about 8 or 16; a burst limit smaller than the
+SoC's memory bridge accepts is a plausible cause of a bus-level stall, so it is the first thing to try if the board stops with a frame in flight); the MAC's transmitter goes on at link-up, last, after the speed (the public driver
+enables both directions when the interface opens, before the link, and sets speed and duplex when the link comes); the transmit status block is off. The write order of the descriptor (address words, then length/status)
+is harmless: the controller does not look before the producer index moves.
+
+*What I changed.* Nothing that can be defended as the fix: I found no defect in the descriptor, the ring registers, the doorbell order or the buffer address. What changed is what the next run will show:
+1. **Before the first doorbell** the log now has the descriptor(s) as the controller will read them (`tx descriptor N: length/status ..., buffer bus address ...`) and two lines with every transmit register read back (`tx ring before the kick: ...`, `tx engine before the kick: ...`): the ring pointers, size, start, end, threshold, flow period, the engine's control, ring config and burst, the UMAC's command, flush and max frame, the TBUF control and flush, the RGMII block and the port control. Only registers the bring-up already wrote or read are read back, so none of them is new to the SoC.
+2. **`milk.genet=txprobe`** (implies `probe`): the link comes up with the MAC's transmitter **off** (the `link-mac-tx-en` step is left out) and the network stack is held back (its frames are dropped and counted as `held by txprobe` in the 10-second line; no DHCP, no IPv6). A second after the link is up the Ethernet thread runs `rpikit::genet::init::TXPROBE` once. Every step is named in the log, and the log saved to the card, before it runs; an SError is caught after each.
+
+| # | step | what |
+|---|---|---|
+| 1-5 | `txp-dma-status`, `txp-arb-ctrl`, `txp-priority-0..2` | reads of the transmit engine's status (`0x5048`), arbiter (`0x506c`) and priorities (`0x5070..0x5078`): never read by the driver before |
+| 6 | `txp-frame` | the frame is built in a page of its own (broadcast, source `02:6d:69:6c:6b:74` locally administered, EtherType `0x88b5`, "milkOS genet txprobe", zero padded to 60 bytes) and cleaned out to memory |
+| 7 | `txp-mac-tx-en` | `UMAC_CMD \|= TX_EN`: the transmitter on, nothing to send |
+| 8 | `txp-settle-tx-en` | two seconds of nothing, a saved `alive` line (no register read) every half second |
+| 9-11 | `txp-desc-addr-lo`, `-hi`, `-status` | descriptor 0, word by word |
+| 12 | `txp-readback` | descriptor 0 and every transmit register, read back |
+| 13 | `txp-doorbell` | `dsb sy`, then the producer index <- 1 |
+| 14 | `txp-wait-sent` | poll the consumer index for 1, at most 500 ms |
+| 15-16 | `txp-after`, `txp-settle-sent` | the registers once more, three more seconds of `alive` lines, then `txprobe: done` |
+
+*How to read the next log* (cable in a spare port of a switch or router; `cmdline.txt`: `milk.genet=probe` for the default, `milk.genet=txprobe` for the experiment; `scripts/pi-readlog.sh ... --last`):
+
+| the file ends with | meaning |
+|---|---|
+| default run: `first-tx-kick`, its two `tx ...` lines, then nothing | the doorbell or the frame's trip: compare the printed descriptor, `tdma ctrl`, burst and UMAC command with the table above; if they are as listed, try the burst of 8 (a one-line change in `rpikit::genet::init::INIT`, steps `rdma-burst` and `tdma-burst`) |
+| default run: the file ends at `link-mac-tx-en` or `first-rx-frame` again | not the descriptor at all: the MAC's transmitter being on, or the receive path, runs into the stop; run `txprobe`, and `norx` against it |
+| `txprobe`: `txp-mac-tx-en` is the last line, or `alive` lines stop within the two seconds after it | **the transmitter alone** stops the SoC with nothing queued: the RGMII transmit clock (the MAC's 125 MHz clock for gigabit), `ID_MODE_DIS`, the clock or power domain of the block; no descriptor is involved |
+| `txprobe`: `txp-desc-addr-lo`, `-hi` or `-status` is the last | a write to the transmit engine's descriptor memory while the transmitter is on |
+| `txprobe`: `txp-doorbell` is the last line | the doorbell: the engine's first fetch of the descriptor or the buffer (read the `txp-readback` lines: addresses, ring pointers, burst) |
+| `txprobe`: `txp-wait-sent ok (read 0x1)` and later lines | the frame was taken by the engine and sent; if `alive` lines continue to `txprobe: done`, transmitting works and the stack's own frames are the difference (run the default again, and tell what the router sees: the broadcast frame shows up in a capture on the LAN as EtherType 0x88b5 from `02:6d:69:6c:6b:74`) |
+| `txprobe`: `txp-wait-sent ok (read 0x0)` | the engine did not report the frame done within 500 ms but the board lives: the descriptor is not being taken (the readback lines show the pointers) |
+| `txprobe: an SError was taken at step ...` | the SoC refused that access; the step names it |
+
+*Confidence.* Low that anything shipped here fixes the freeze; moderate that the freeze is tied to the MAC's transmitter being on (every stop was after `TX_EN`; one without any frame queued), and low that it is the burst
+size. Nothing is provable without the board; the order of the experiments above is chosen so that one run per cmdline narrows it to one row of the table.
 
 ### Watchdog: a frozen board resets itself
 

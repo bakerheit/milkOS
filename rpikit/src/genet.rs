@@ -24,6 +24,32 @@ pub const fn tx_status(len: usize) -> u32 {
         | bd::EOP
 }
 
+/// A descriptor's three words as the controller keeps them, in memory order: length/status, buffer address low, buffer
+/// address high.
+pub const fn tx_desc_words(pa: u64, len: usize) -> [u32; 3] {
+    [tx_status(len), pa as u32, (pa >> 32) as u32]
+}
+
+/// The shortest frame the MAC sends without the FCS it appends (the driver pads to this).
+pub const MIN_FRAME: usize = 60;
+
+/// The source address of the `txprobe` frame: locally administered (bit 1 of the first byte), unicast, nobody's real one.
+pub const TXPROBE_SRC: [u8; 6] = [0x02, 0x6d, 0x69, 0x6c, 0x6b, 0x74];
+/// EtherType 0x88b5: "Local Experimental Ethertype 1" (IEEE 802). No IP, no DHCP, nothing a host answers.
+pub const TXPROBE_ETHERTYPE: u16 = 0x88b5;
+
+/// The one frame `milk.genet=txprobe` sends: broadcast destination, [`TXPROBE_SRC`], EtherType 0x88b5, a short text,
+/// zero padded to [`MIN_FRAME`] bytes (the MAC appends the FCS).
+pub fn txprobe_frame() -> [u8; MIN_FRAME] {
+    let mut f = [0u8; MIN_FRAME];
+    f[..6].fill(0xff);
+    f[6..12].copy_from_slice(&TXPROBE_SRC);
+    f[12..14].copy_from_slice(&TXPROBE_ETHERTYPE.to_be_bytes());
+    let text = b"milkOS genet txprobe";
+    f[14..14 + text.len()].copy_from_slice(text);
+    f
+}
+
 /// The length/status word for an empty receive buffer of `size` bytes.
 pub const fn rx_status(size: usize) -> u32 {
     (size as u32 & 0xfff) << bd::LENGTH_SHIFT
@@ -176,6 +202,8 @@ pub mod regs {
     // engine's global registers.
     pub const TOTAL_DESC: usize = 256;
     pub const DESC_SIZE: usize = 12;
+    /// Words (4 bytes) per descriptor, and the descriptor memory's size in words.
+    pub const DESC_WORDS: usize = 3;
     pub const RING_SIZE_BYTES: usize = 0x40;
     pub const DEFAULT_RING: usize = 16;
     pub const RINGS_SIZE: usize = RING_SIZE_BYTES * (DEFAULT_RING + 1);
@@ -199,7 +227,11 @@ pub mod regs {
     // DMA engine registers.
     pub const D_RING_CFG: usize = 0x00;
     pub const D_CTRL: usize = 0x04;
+    pub const D_STATUS: usize = 0x08;
     pub const D_SCB_BURST_SIZE: usize = 0x0c;
+    /// Transmit arbiter mode and the per-ring priorities (read only by `txprobe`; nothing writes them).
+    pub const D_ARB_CTRL: usize = 0x2c;
+    pub const D_PRIORITY_0: usize = 0x30;
     pub const DMA_EN: u32 = 1 << 0;
     pub const DMA_RING_BUF_EN_SHIFT: u32 = 1;
     pub const DMA_MAX_BURST_LENGTH: u32 = 0x10;
@@ -207,6 +239,12 @@ pub mod regs {
     pub const BD_LENGTH_STATUS: usize = 0;
     pub const BD_ADDR_LO: usize = 4;
     pub const BD_ADDR_HI: usize = 8;
+
+    /// The ring registers' END_ADDR for a ring of `nr` descriptors starting at descriptor 0: the last 32-bit word of the
+    /// ring in the descriptor memory (`nr * 3 - 1`).
+    pub const fn ring_end(nr: usize) -> u32 {
+        (nr * DESC_WORDS - 1) as u32
+    }
 
     pub const RING_SIZE: usize = 64;
     pub const BUF_SIZE: usize = 2048;
@@ -233,6 +271,10 @@ pub mod init {
         TxDma,
         /// The interrupt line (left masked by `polled`, and by `norx`: nothing would raise it).
         Irq,
+        /// The MAC's transmitter going on at link-up (left for `txprobe` to do by hand).
+        TxEn,
+        /// The network stack sending (nothing for `notx` and `txprobe`: no frame of the stack's reaches the ring).
+        StackTx,
     }
 
     /// `milk.genet=`: a comma separated list of words, how the driver runs. All off (no option) is the normal driver.
@@ -250,6 +292,10 @@ pub mod init {
         pub notx: bool,
         /// The interrupt stays masked: the rings are polled by the Ethernet thread only.
         pub polled: bool,
+        /// Link up with the MAC's transmitter still off and the network stack held back; then, once, by hand and with every
+        /// register access logged and saved first: the transmitter on, a pause, one broadcast frame (EtherType 0x88b5,
+        /// no IP) handed to the ring, the doorbell, the wait for the consumer index. Implies `probe`.
+        pub txprobe: bool,
     }
 
     impl Options {
@@ -265,6 +311,10 @@ pub mod init {
                     b"norx" => o.norx = true,
                     b"notx" => o.notx = true,
                     b"polled" => o.polled = true,
+                    b"txprobe" => {
+                        o.txprobe = true;
+                        o.probe = true;
+                    }
                     b"" | b"normal" | b"off" | b"0" => {}
                     other => unknown = unknown.or(Some(other)),
                 }
@@ -279,12 +329,14 @@ pub mod init {
                 Gate::RxDma => !self.norx,
                 Gate::TxDma => !self.notx,
                 Gate::Irq => !self.polled && !self.norx,
+                Gate::TxEn => !self.txprobe,
+                Gate::StackTx => !self.notx && !self.txprobe,
             }
         }
 
         /// Is anything but `probe` asked for?
         pub const fn degraded(&self) -> bool {
-            self.nolink || self.norx || self.notx || self.polled
+            self.nolink || self.norx || self.notx || self.polled || self.txprobe
         }
 
         /// How many steps of `steps` run with these options.
@@ -301,6 +353,7 @@ pub mod init {
                 (self.norx, "norx"),
                 (self.notx, "notx"),
                 (self.polled, "polled"),
+                (self.txprobe, "txprobe"),
             ] {
                 if on {
                     f.write_str(if first { "" } else { "," })?;
@@ -341,6 +394,14 @@ pub mod init {
         MacSpeed,
         /// No access of its own: a point in the story the log wants to name (the text says what happens next).
         Event(&'static str),
+        /// `txprobe`: write descriptor 0's address low / address high / length-status word (values from the probe frame's page).
+        DescAddrLo,
+        DescAddrHi,
+        DescStatus,
+        /// `txprobe`: do nothing for this many milliseconds, saying in the (saved) log every half second that the CPU lives.
+        Settle(u32),
+        /// `txprobe`: poll the register (the ring's consumer index) until it reads 1, at most 500 ms.
+        WaitConsumer,
     }
 
     /// One access of the bring-up.
@@ -373,6 +434,11 @@ pub mod init {
                 Op::LinkResolve => write!(f, "read the PHY's registers 4, 5, 9 and 10 over MDIO"),
                 Op::MacSpeed => write!(f, "genet+{:#x}: speed and duplex bits <- the negotiated mode", self.reg),
                 Op::Event(what) => f.write_str(what),
+                Op::DescAddrLo => write!(f, "write genet+{:#x} <- the probe frame's bus address, low word", self.reg),
+                Op::DescAddrHi => write!(f, "write genet+{:#x} <- the probe frame's bus address, high word", self.reg),
+                Op::DescStatus => write!(f, "write genet+{:#x} <- length 60, SOP, EOP, append CRC, queue tag 0x3f", self.reg),
+                Op::Settle(ms) => write!(f, "wait {ms} ms, saying every 500 ms that the CPU lives"),
+                Op::WaitConsumer => write!(f, "read genet+{:#x} until it is 1 (at most 500 ms)", self.reg),
             }
         }
     }
@@ -454,7 +520,7 @@ pub mod init {
         s("rx-buf-size", ring_reg(R, R_BUF_SIZE), Op::Write((RING_SIZE as u32) << 16 | BUF_SIZE as u32)),
         s("rx-start-lo", ring_reg(R, R_START_ADDR), Op::Write(0)),
         s("rx-start-hi", ring_reg(R, R_START_ADDR + 4), Op::Write(0)),
-        s("rx-end-lo", ring_reg(R, R_END_ADDR), Op::Write((RING_SIZE * 3 - 1) as u32)),
+        s("rx-end-lo", ring_reg(R, R_END_ADDR), Op::Write(ring_end(RING_SIZE))),
         s("rx-end-hi", ring_reg(R, R_END_ADDR + 4), Op::Write(0)),
         s("rx-mbuf-thresh", ring_reg(R, R_MBUF_DONE_THRESH), Op::Write(1)),
         // Flow control thresholds: pause the sender when 5 descriptors are left, resume at a sixteenth.
@@ -471,7 +537,7 @@ pub mod init {
         s("tx-buf-size", ring_reg(T, R_BUF_SIZE), Op::Write((RING_SIZE as u32) << 16 | BUF_SIZE as u32)),
         s("tx-start-lo", ring_reg(T, R_START_ADDR), Op::Write(0)),
         s("tx-start-hi", ring_reg(T, R_START_ADDR + 4), Op::Write(0)),
-        s("tx-end-lo", ring_reg(T, R_END_ADDR), Op::Write((RING_SIZE * 3 - 1) as u32)),
+        s("tx-end-lo", ring_reg(T, R_END_ADDR), Op::Write(ring_end(RING_SIZE))),
         s("tx-end-hi", ring_reg(T, R_END_ADDR + 4), Op::Write(0)),
         s("tx-read-ptr-lo", ring_reg(T, R_READ_PTR), Op::Write(0)),
         s("tx-read-ptr-hi", ring_reg(T, R_READ_PTR + 4), Op::Write(0)),
@@ -503,7 +569,7 @@ pub mod init {
         s("link-umac-speed", UMAC_CMD, Op::MacSpeed),
         s("link-mac-rx-en", UMAC_CMD, Op::Set(CMD_RX_EN)),
         gated("link-irq-unmask", INTRL2_MASK_CLEAR, Op::Write(IRQ_RXDMA_DONE), Gate::Irq),
-        s("link-mac-tx-en", UMAC_CMD, Op::Set(CMD_TX_EN)),
+        gated("link-mac-tx-en", UMAC_CMD, Op::Set(CMD_TX_EN), Gate::TxEn),
         end("link-announce", 0, Op::Event("the network stack is told the link is up"), "genet-link-up"),
     ];
 
@@ -521,8 +587,32 @@ pub mod init {
             "first-tx-kick",
             0,
             Op::Event("the first frame is in its descriptor; next the transmit producer index is written"),
-            Gate::TxDma,
+            Gate::StackTx,
         ),
+    ];
+
+    /// `milk.genet=txprobe`, run once by the Ethernet thread about a second after the link is up (the network stack sends nothing,
+    /// and `link-mac-tx-en` was left out of the link-up path). Every step is logged, and the log saved to the card, *before* it
+    /// runs. The first five are reads of the transmit DMA's registers nobody else touches (arbiter, priorities, status); then
+    /// the MAC's transmitter on with nothing to send for two seconds (is the transmitter alone safe?); then descriptor 0 written
+    /// word by word, read back with every ring register; then the doorbell, the wait for the consumer index, and a last pause.
+    pub const TXPROBE: &[Step] = &[
+        s("txp-dma-status", dma_reg(T, D_STATUS), Op::Read),
+        s("txp-arb-ctrl", dma_reg(T, D_ARB_CTRL), Op::Read),
+        s("txp-priority-0", dma_reg(T, D_PRIORITY_0), Op::Read),
+        s("txp-priority-1", dma_reg(T, D_PRIORITY_0 + 4), Op::Read),
+        s("txp-priority-2", dma_reg(T, D_PRIORITY_0 + 8), Op::Read),
+        s("txp-frame", 0, Op::Event("the probe frame is built in a page of its own and cleaned out to memory")),
+        s("txp-mac-tx-en", UMAC_CMD, Op::Set(CMD_TX_EN)),
+        s("txp-settle-tx-en", 0, Op::Settle(2000)),
+        s("txp-desc-addr-lo", T + BD_ADDR_LO, Op::DescAddrLo),
+        s("txp-desc-addr-hi", T + BD_ADDR_HI, Op::DescAddrHi),
+        s("txp-desc-status", T + BD_LENGTH_STATUS, Op::DescStatus),
+        s("txp-readback", 0, Op::Event("descriptor 0 and every transmit register are read back")),
+        s("txp-doorbell", ring_reg(T, R_PROD_INDEX), Op::Write(1)),
+        s("txp-wait-sent", ring_reg(T, R_CONS_INDEX), Op::WaitConsumer),
+        s("txp-after", 0, Op::Event("the transmit registers are read back once more")),
+        end("txp-settle-sent", 0, Op::Settle(3000), "genet-txprobe"),
     ];
 
     /// The steps of the group that step `i` belongs to (from the step after the previous group's end through the

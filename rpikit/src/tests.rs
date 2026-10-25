@@ -1591,9 +1591,10 @@ mod genet_tests {
     mod init_table {
         use crate::genet::init::*;
         use crate::genet::regs::*;
+        use crate::genet::{MIN_FRAME, TXPROBE_ETHERTYPE, TXPROBE_SRC, bd, regs, tx_desc_words, tx_status, txprobe_frame};
 
         fn all() -> std::vec::Vec<(&'static str, &'static [Step])> {
-            std::vec![("init", INIT), ("irq-mask", IRQ_MASK), ("dma-on", DMA_ON), ("link-up", LINK_UP), ("first-frames", FIRST_FRAMES)]
+            std::vec![("init", INIT), ("irq-mask", IRQ_MASK), ("dma-on", DMA_ON), ("link-up", LINK_UP), ("first-frames", FIRST_FRAMES), ("txprobe", TXPROBE)]
         }
 
         fn pos(name: &str) -> usize {
@@ -1608,7 +1609,7 @@ mod genet_tests {
                     assert!(seen.insert(s.name), "step name {} twice", s.name);
                     assert!(!s.name.is_empty() && s.name.len() <= 24, "{}", s.name);
                     match s.op {
-                        Op::DelayUs(_) | Op::LinkResolve | Op::Event(_) => assert_eq!(s.reg, 0, "{t}/{}", s.name),
+                        Op::DelayUs(_) | Op::LinkResolve | Op::Event(_) | Op::Settle(_) => assert_eq!(s.reg, 0, "{t}/{}", s.name),
                         Op::ClearDescriptors | Op::PostRxDescriptors => {}
                         _ => {
                             assert!(s.reg < 0x1_0000 && s.reg % 4 == 0, "{t}/{}: {:#x}", s.name, s.reg);
@@ -1696,6 +1697,155 @@ mod genet_tests {
                 let g = group_of(INIT, i);
                 assert!(g.contains(&i) && INIT[g.end - 1].group_end.is_some());
             }
+        }
+
+        #[test]
+        fn the_transmit_ring_is_the_receive_ring_in_the_transmit_block() {
+            // Same geometry, same order of meaning: every receive ring register written has a transmit twin at the same ring offset.
+            let rx = |n: &str| INIT.iter().find(|s| s.name == n).unwrap();
+            let tx = |n: &str| INIT.iter().find(|s| s.name == n).unwrap();
+            for (r, t) in [
+                ("rx-buf-size", "tx-buf-size"),
+                ("rx-start-lo", "tx-start-lo"),
+                ("rx-start-hi", "tx-start-hi"),
+                ("rx-end-lo", "tx-end-lo"),
+                ("rx-end-hi", "tx-end-hi"),
+                ("rx-mbuf-thresh", "tx-mbuf-thresh"),
+                ("rx-read-ptr-lo", "tx-read-ptr-lo"),
+                ("rx-read-ptr-hi", "tx-read-ptr-hi"),
+                ("rx-write-ptr-lo", "tx-write-ptr-lo"),
+                ("rx-write-ptr-hi", "tx-write-ptr-hi"),
+                ("rx-cons-index", "tx-cons-index"),
+                ("rx-prod-index", "tx-prod-index"),
+                ("rdma-burst", "tdma-burst"),
+            ] {
+                assert_eq!(rx(r).reg - RDMA, tx(t).reg - TDMA, "{r} / {t}");
+                assert_eq!(rx(r).op, tx(t).op, "{r} / {t}");
+            }
+            // The engines' blocks: descriptors (256 x 3 words), 17 rings of 0x40, then the global registers.
+            assert_eq!(DESC_BYTES, 0xc00);
+            assert_eq!(TDMA + DESC_BYTES, 0x4c00);
+            assert_eq!(ring_reg(TDMA, 0), 0x5000, "ring 16 of the transmit engine");
+            assert_eq!(ring_reg(TDMA, R_READ_PTR), 0x5000);
+            assert_eq!(ring_reg(TDMA, R_CONS_INDEX), 0x5008);
+            assert_eq!(ring_reg(TDMA, R_PROD_INDEX), 0x500c);
+            assert_eq!(ring_reg(TDMA, R_BUF_SIZE), 0x5010);
+            assert_eq!(ring_reg(TDMA, R_START_ADDR), 0x5014);
+            assert_eq!(ring_reg(TDMA, R_END_ADDR), 0x501c);
+            assert_eq!(ring_reg(TDMA, R_MBUF_DONE_THRESH), 0x5024);
+            assert_eq!(ring_reg(TDMA, R_FLOW_PERIOD), 0x5028);
+            assert_eq!(ring_reg(TDMA, R_WRITE_PTR), 0x502c);
+            assert_eq!(dma_reg(TDMA, D_RING_CFG), 0x5040);
+            assert_eq!(dma_reg(TDMA, D_CTRL), 0x5044);
+            assert_eq!(dma_reg(TDMA, D_STATUS), 0x5048);
+            assert_eq!(dma_reg(TDMA, D_SCB_BURST_SIZE), 0x504c);
+            assert_eq!(dma_reg(TDMA, D_ARB_CTRL), 0x506c);
+            assert_eq!(dma_reg(TDMA, D_PRIORITY_0), 0x5070);
+            // The ring: 64 descriptors of 3 words from word 0, so the last word is 191; the enable bits are the engine's and ring 16's.
+            assert_eq!(ring_end(RING_SIZE), 191);
+            assert_eq!(ring_end(256), 767, "the whole descriptor memory");
+            assert!(RING_SIZE <= TOTAL_DESC && BUF_SIZE >= MAX_FRAME);
+            assert_eq!(DMA_ON_BITS, 1 << 17 | 1);
+            assert_eq!(dma_reg(TDMA, D_RING_CFG), dma_reg(TDMA, D_CTRL) - 4);
+            // Descriptor words: length/status at 0, buffer address low at 4, high at 8, inside the 12-byte record.
+            assert_eq!((BD_LENGTH_STATUS, BD_ADDR_LO, BD_ADDR_HI, DESC_SIZE), (0, 4, 8, 12));
+            assert_eq!(DESC_SIZE, DESC_WORDS * 4);
+            // The transmit enable of the MAC is the last thing the link-up path does to it, after the receiver.
+            let l = |n: &str| LINK_UP.iter().position(|s| s.name == n).unwrap();
+            assert!(l("link-mac-tx-en") > l("link-mac-rx-en") && l("link-mac-tx-en") > l("link-umac-speed"));
+        }
+
+        #[test]
+        fn the_first_frame_is_a_whole_valid_descriptor() {
+            let w = tx_desc_words(0x2831000, 60);
+            assert_eq!(w, [60 << 16 | 0x3f << 7 | 0x40 | 0x2000 | 0x4000, 0x2831000, 0]);
+            assert_eq!(w[0], 0x003c_7fc0);
+            assert_eq!(tx_desc_words(0x1_8000_0000, 60)[1..], [0x8000_0000, 1], "addresses above 4 GiB split into two words");
+            // Single descriptor frame: both SOP and EOP, a length that is a frame (not zero, not above the buffer), the CRC left to the MAC.
+            for len in [MIN_FRAME, 98, 300, regs::MAX_FRAME] {
+                let st = tx_status(len);
+                assert!(st & bd::SOP != 0 && st & bd::EOP != 0 && st & bd::TX_APPEND_CRC != 0, "{len}");
+                assert_eq!((st >> bd::LENGTH_SHIFT) as usize, len);
+                assert!(len >= MIN_FRAME && len <= regs::BUF_SIZE);
+                assert_eq!(st >> bd::TX_QTAG_SHIFT & bd::TX_QTAG_MASK, 0x3f, "the default queue's tag");
+            }
+        }
+
+        #[test]
+        fn the_probe_frame_is_harmless() {
+            let f = txprobe_frame();
+            assert_eq!(f.len(), MIN_FRAME, "already the minimum: no padding left to the MAC");
+            assert_eq!(f[..6], [0xff; 6], "broadcast");
+            assert_eq!(f[6..12], TXPROBE_SRC);
+            assert_eq!(TXPROBE_SRC[0] & 0x02, 0x02, "locally administered");
+            assert_eq!(TXPROBE_SRC[0] & 0x01, 0, "a unicast source");
+            assert_eq!(u16::from_be_bytes([f[12], f[13]]), 0x88b5, "IEEE local experimental ethertype 1");
+            assert!(f[14..].starts_with(b"milkOS genet txprobe"));
+            assert!(f[14 + 20..].iter().all(|&b| b == 0), "zero padded");
+            // Not IPv4 (0x0800), ARP (0x0806), IPv6 (0x86dd) or a VLAN tag (0x8100): no stack on the LAN looks at it.
+            assert!(![0x0800u16, 0x0806, 0x86dd, 0x8100].contains(&u16::from_be_bytes([f[12], f[13]])));
+        }
+
+        #[test]
+        fn the_txprobe_table_goes_in_the_safe_order() {
+            let p = |n: &str| TXPROBE.iter().position(|s| s.name == n).unwrap_or_else(|| panic!("no step {n}"));
+            // The frame exists in memory before the descriptor points at it; the transmitter goes on (and is watched alone) before any
+            // descriptor is written; the descriptor is whole before it is read back; the doorbell is the only write to the ring's
+            // producer index, comes after the read-back, and the wait for the consumer comes right after it.
+            assert!(p("txp-frame") < p("txp-mac-tx-en"));
+            assert!(p("txp-mac-tx-en") < p("txp-settle-tx-en") && p("txp-settle-tx-en") < p("txp-desc-addr-lo"));
+            assert!(p("txp-desc-addr-lo") < p("txp-desc-addr-hi") && p("txp-desc-addr-hi") < p("txp-desc-status"));
+            assert!(p("txp-desc-status") < p("txp-readback") && p("txp-readback") < p("txp-doorbell"));
+            assert_eq!(p("txp-wait-sent"), p("txp-doorbell") + 1);
+            assert_eq!(TXPROBE[p("txp-doorbell")].op, Op::Write(1));
+            assert_eq!(TXPROBE[p("txp-doorbell")].reg, 0x500c);
+            assert_eq!(TXPROBE[p("txp-wait-sent")].reg, 0x5008);
+            let writes: std::vec::Vec<_> = TXPROBE
+                .iter()
+                .filter(|s| matches!(s.op, Op::Write(_) | Op::Set(_) | Op::DescAddrLo | Op::DescAddrHi | Op::DescStatus))
+                .map(|s| (s.name, s.reg))
+                .collect();
+            assert_eq!(
+                writes,
+                [("txp-mac-tx-en", 0x808), ("txp-desc-addr-lo", 0x4004), ("txp-desc-addr-hi", 0x4008), ("txp-desc-status", 0x4000), ("txp-doorbell", 0x500c)],
+                "the probe writes exactly these registers"
+            );
+            // Descriptor 0 words, in the record's own offsets.
+            assert_eq!(TXPROBE[p("txp-desc-status")].reg, TDMA + BD_LENGTH_STATUS);
+            // The unknown-to-us registers are read before anything is written, and only read.
+            for n in ["txp-dma-status", "txp-arb-ctrl", "txp-priority-0", "txp-priority-1", "txp-priority-2"] {
+                assert_eq!(TXPROBE[p(n)].op, Op::Read);
+                assert!(p(n) < p("txp-mac-tx-en"));
+            }
+            assert_eq!(TXPROBE.last().unwrap().group_end, Some("genet-txprobe"));
+            assert_eq!(TXPROBE.iter().filter(|s| s.group_end.is_some()).count(), 1);
+            assert_eq!(TXPROBE.iter().filter(|s| matches!(s.op, Op::Settle(_))).count(), 2, "the transmitter alone, then after the frame");
+        }
+
+        #[test]
+        fn options_decide_what_runs() {
+            let (o, bad) = Options::parse(Some(b"txprobe"));
+            assert!(bad.is_none() && o.txprobe && o.probe, "txprobe implies probe (the log is saved before every access)");
+            assert!(o.degraded());
+            // With txprobe: the transmitter is not switched on by the link-up path, the stack's first frame never happens, the DMA engines stay on.
+            let on = |o: &Options, n: &str| LINK_UP.iter().chain(FIRST_FRAMES).chain(DMA_ON).any(|s| s.name == n && o.runs(s.gate));
+            assert!(!on(&o, "link-mac-tx-en") && !on(&o, "first-tx-kick"));
+            assert!(on(&o, "link-mac-rx-en") && on(&o, "first-rx-frame") && on(&o, "tdma-on") && on(&o, "rdma-on"));
+            assert_eq!(o.count(LINK_UP), 6);
+            assert_eq!(o.count(FIRST_FRAMES), 1);
+            // Without: everything runs as it always did.
+            let (n, _) = Options::parse(Some(b"probe"));
+            assert!(!n.txprobe && on(&n, "link-mac-tx-en") && on(&n, "first-tx-kick"));
+            assert_eq!((n.count(LINK_UP), n.count(FIRST_FRAMES)), (7, 2));
+            // notx takes the stack's frame and the transmit DMA, but the transmitter enable stays.
+            let (x, _) = Options::parse(Some(b"notx"));
+            assert!(on(&x, "link-mac-tx-en") && !on(&x, "first-tx-kick") && !on(&x, "tdma-on"));
+            // Words round trip.
+            let mut w = std::string::String::new();
+            Options::parse(Some(b"polled,txprobe")).0.write_words(&mut w).unwrap();
+            assert_eq!(w, "probe,polled,txprobe");
+            let (u, bad) = Options::parse(Some(b"txprobe,bogus"));
+            assert!(u.txprobe && bad == Some(&b"bogus"[..]));
         }
 
         #[test]

@@ -130,6 +130,11 @@ static IRQS_ALL: AtomicU32 = AtomicU32::new(0);
 static IRQ_LAST_STATUS: AtomicU32 = AtomicU32::new(0);
 /// Frames the stack wanted to send with `milk.genet=notx`.
 static TX_DISABLED: AtomicU64 = AtomicU64::new(0);
+/// Frames the stack wanted to send with `milk.genet=txprobe` (held back: only the probe frame goes out).
+static TX_HELD: AtomicU64 = AtomicU64::new(0);
+/// `milk.genet=txprobe`: the probe frame's page (bus address; 0: none) and whether the probe has run.
+static TXPROBE_PA: AtomicU64 = AtomicU64::new(0);
+static TXPROBE_RAN: AtomicBool = AtomicBool::new(false);
 /// The link-up path stopped on an SError: it is not tried again this boot.
 static LINK_BROKEN: AtomicBool = AtomicBool::new(false);
 /// With `milk.genet=nolink`: the PHY has a link (nothing else is done about it).
@@ -144,9 +149,10 @@ const OPT_NOLINK: u8 = 2;
 const OPT_NORX: u8 = 4;
 const OPT_NOTX: u8 = 8;
 const OPT_POLLED: u8 = 16;
+const OPT_TXPROBE: u8 = 32;
 
 fn set_opts(o: gk::Options) {
-    let bits = [(o.probe, OPT_PROBE), (o.nolink, OPT_NOLINK), (o.norx, OPT_NORX), (o.notx, OPT_NOTX), (o.polled, OPT_POLLED)]
+    let bits = [(o.probe, OPT_PROBE), (o.nolink, OPT_NOLINK), (o.norx, OPT_NORX), (o.notx, OPT_NOTX), (o.polled, OPT_POLLED), (o.txprobe, OPT_TXPROBE)]
         .iter()
         .fold(0, |a, &(on, b)| if on { a | b } else { a });
     OPT_BITS.store(bits, Ordering::Relaxed);
@@ -154,7 +160,7 @@ fn set_opts(o: gk::Options) {
 
 fn opts() -> gk::Options {
     let b = OPT_BITS.load(Ordering::Relaxed);
-    gk::Options { probe: b & OPT_PROBE != 0, nolink: b & OPT_NOLINK != 0, norx: b & OPT_NORX != 0, notx: b & OPT_NOTX != 0, polled: b & OPT_POLLED != 0 }
+    gk::Options { probe: b & OPT_PROBE != 0, nolink: b & OPT_NOLINK != 0, norx: b & OPT_NORX != 0, notx: b & OPT_NOTX != 0, polled: b & OPT_POLLED != 0, txprobe: b & OPT_TXPROBE != 0 }
 }
 
 fn probing() -> bool {
@@ -460,6 +466,12 @@ impl Genet {
             TX_DISABLED.fetch_add(1, Ordering::Relaxed);
             return false;
         }
+        // `milk.genet=txprobe`: the stack is held back; the one frame that goes out is the probe's.
+        if opts().txprobe {
+            self.stats.tx_dropped += 1;
+            TX_HELD.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
         let cons = rd(ring_reg(TDMA, R_CONS_INDEX)) as u16;
         if gk::in_flight(self.tx_prod, cons) >= RING_SIZE {
             self.stats.tx_dropped += 1;
@@ -594,7 +606,14 @@ impl Bringup<'_> {
                 dma::sync(self.rx.va(), self.rx.len());
             }
             // Link-up path and markers: not part of the bring-up tables.
-            gk::Op::LinkResolve | gk::Op::MacSpeed | gk::Op::Event(_) => {}
+            gk::Op::LinkResolve
+            | gk::Op::MacSpeed
+            | gk::Op::Event(_)
+            | gk::Op::DescAddrLo
+            | gk::Op::DescAddrHi
+            | gk::Op::DescStatus
+            | gk::Op::Settle(_)
+            | gk::Op::WaitConsumer => {}
         }
         None
     }
@@ -709,6 +728,16 @@ pub fn init() {
         );
     }
     set_opts(o);
+    if o.txprobe {
+        // The probe frame lives in a page of its own (leaked: it exists only for this experiment).
+        match Buffer::new(1, 1) {
+            Some(b) if b.pa() + b.len() as u64 <= limit => {
+                TXPROBE_PA.store(b.pa(), Ordering::Release);
+                core::mem::forget(b);
+            }
+            _ => kprintln!("[genet] milk.genet=txprobe: no page for the probe frame: the probe will not run"),
+        }
+    }
     let probe = o.probe;
     let total = gk::init::INIT.len() + gk::init::IRQ_MASK.len() + o.count(gk::init::DMA_ON);
     if probe || o.degraded() {
@@ -729,6 +758,9 @@ pub fn init() {
     }
     if o.notx {
         kprintln!("[genet] milk.genet=notx: the transmit DMA engine stays off, nothing is ever sent");
+    }
+    if o.txprobe {
+        kprintln!("[genet] milk.genet=txprobe: the link comes up with the MAC's transmitter still off and the network stack held back; about a second later one 60-byte broadcast frame (EtherType 0x88b5, no IP) is sent by hand, every access logged and saved first (`txprobe: step N name`)");
     }
     if o.polled {
         kprintln!("[genet] milk.genet=polled: the interrupt stays masked, the rings are polled every 10 ms by the Ethernet thread");
@@ -805,6 +837,7 @@ pub fn start() {
     crate::sched::spawn("genet", || {
         let mut n = 0u32;
         let mut reports = 0u32;
+        let mut up_ticks = 0u32;
         let mut last = (0u64, 0u64, 0u64);
         loop {
             crate::sched::sleep_ms(10);
@@ -818,6 +851,18 @@ pub fn start() {
             }
             if probing() {
                 first_frames();
+            }
+            if opts().txprobe && !TXPROBE_RAN.load(Ordering::Relaxed) {
+                if LINK_UP.load(Ordering::Acquire) {
+                    up_ticks += 1;
+                    // About a second after the link came up (the receive side has settled and been looked at).
+                    if up_ticks >= 100 {
+                        TXPROBE_RAN.store(true, Ordering::Relaxed);
+                        txprobe();
+                    }
+                } else {
+                    up_ticks = 0;
+                }
             }
             // Safety net next to the interrupt: look at the rings every 10 ms.
             crate::net::on_device_irq();
@@ -884,6 +929,12 @@ fn first_frames() {
                 rd(UMAC_CMD),
                 rd(dma_reg(TDMA, D_CTRL))
             );
+            // What the controller is about to be handed: the descriptors, every transmit register (all of them written
+            // or read before in this boot, so none can be new to the SoC).
+            for slot in 0..(wanted & 0xffff).min(4) as usize {
+                dump_descriptor(slot);
+            }
+            dump_tx_registers("before the kick");
             save_log();
             TX_ANNOUNCED.store(true, Ordering::Relaxed);
         }
@@ -894,12 +945,160 @@ fn first_frames() {
     }
 }
 
+/// One transmit descriptor as the controller will read it (three reads of its own memory, which the CPU wrote).
+fn dump_descriptor(slot: usize) {
+    let b = TDMA + slot * DESC_SIZE;
+    let (st, lo, hi) = (rd(b + BD_LENGTH_STATUS), rd(b + BD_ADDR_LO), rd(b + BD_ADDR_HI));
+    kprintln!(
+        "[genet] tx descriptor {slot}: length/status {st:#010x} (length {}, SOP {}, EOP {}, append CRC {}, queue tag {:#x}), buffer bus address {hi:#x}:{lo:08x}",
+        st >> gk::bd::LENGTH_SHIFT & 0xfff,
+        st >> 13 & 1,
+        st >> 14 & 1,
+        st >> 6 & 1,
+        st >> gk::bd::TX_QTAG_SHIFT & gk::bd::TX_QTAG_MASK
+    );
+}
+
+/// The transmit side's registers, read back in one line each for the log: the default ring's, the engine's, and the
+/// UMAC / TBUF / RGMII ones that decide whether a frame can leave. Only registers the bring-up already wrote or read in
+/// this boot (so the SoC has answered all of them before).
+fn dump_tx_registers(when: &str) {
+    kprintln!(
+        "[genet] tx ring {when}: read ptr {} cons {} prod {} write ptr {} | buf size {:#x} start {} end {} | mbuf thresh {} flow {:#x}",
+        rd(ring_reg(TDMA, R_READ_PTR)),
+        rd(ring_reg(TDMA, R_CONS_INDEX)) as u16,
+        rd(ring_reg(TDMA, R_PROD_INDEX)) as u16,
+        rd(ring_reg(TDMA, R_WRITE_PTR)),
+        rd(ring_reg(TDMA, R_BUF_SIZE)),
+        rd(ring_reg(TDMA, R_START_ADDR)),
+        rd(ring_reg(TDMA, R_END_ADDR)),
+        rd(ring_reg(TDMA, R_MBUF_DONE_THRESH)),
+        rd(ring_reg(TDMA, R_FLOW_PERIOD))
+    );
+    kprintln!(
+        "[genet] tx engine {when}: tdma ctrl {:#x} ring cfg {:#x} burst {:#x} | umac cmd {:#x} tx flush {:#x} max frame {} | tbuf ctrl {:#x} tbuf flush {:#x} rbuf/tbuf size {:#x} | rgmii oob {:#x} port ctrl {:#x}",
+        rd(dma_reg(TDMA, D_CTRL)),
+        rd(dma_reg(TDMA, D_RING_CFG)),
+        rd(dma_reg(TDMA, D_SCB_BURST_SIZE)),
+        rd(UMAC_CMD),
+        rd(UMAC_TX_FLUSH),
+        rd(UMAC_MAX_FRAME_LEN),
+        rd(TBUF_CTRL),
+        rd(SYS_TBUF_FLUSH_CTRL),
+        rd(RBUF_TBUF_SIZE_CTRL),
+        rd(EXT_RGMII_OOB_CTRL),
+        rd(SYS_PORT_CTRL)
+    );
+}
+
+/// `milk.genet=txprobe`: transmit one harmless frame by hand (`rpikit::genet::init::TXPROBE`). Every step is named in the log,
+/// and the log saved to the card, before it runs; nothing else transmits. Runs on the Ethernet thread, once.
+fn txprobe() {
+    let steps = gk::init::TXPROBE;
+    let total = steps.len();
+    let pa = TXPROBE_PA.load(Ordering::Acquire);
+    if pa == 0 || opts().notx {
+        kprintln!("[genet] txprobe: not run ({})", if pa == 0 { "no page for the frame" } else { "milk.genet=notx keeps the transmit DMA off" });
+        return;
+    }
+    let frame = gk::txprobe_frame();
+    let va = phys_to_virt(pa as usize);
+    let words = gk::tx_desc_words(pa, frame.len());
+    kprintln!(
+        "[genet] txprobe: the link has been up for a second; one {}-byte frame follows (to ff:ff:ff:ff:ff:ff from 02:6d:69:6c:6b:74, EtherType {:#06x}, no IP); descriptor words {:#010x} {:#010x} {:#010x}",
+        frame.len(),
+        gk::TXPROBE_ETHERTYPE,
+        words[0],
+        words[1],
+        words[2]
+    );
+    for (i, st) in steps.iter().enumerate() {
+        let n = i + 1;
+        kprintln!("[genet] txprobe: step {n}/{total} {} ({st})", st.name);
+        save_log();
+        let seen = match st.op {
+            gk::Op::Read => Some(rd(st.reg)),
+            gk::Op::Set(b) => {
+                let old = rd(st.reg);
+                wr(st.reg, old | b);
+                Some(old)
+            }
+            gk::Op::Write(v) => {
+                // SAFETY: barrier: the descriptor and the frame are in memory before the controller is told.
+                unsafe { core::arch::asm!("dsb sy", options(nostack, preserves_flags)) };
+                wr(st.reg, v);
+                None
+            }
+            gk::Op::DescAddrLo => {
+                wr(st.reg, words[1]);
+                None
+            }
+            gk::Op::DescAddrHi => {
+                wr(st.reg, words[2]);
+                None
+            }
+            gk::Op::DescStatus => {
+                wr(st.reg, words[0]);
+                None
+            }
+            gk::Op::Settle(ms) => {
+                let mut left = ms;
+                while left > 0 {
+                    let step = left.min(500);
+                    crate::sched::sleep_ms(step as u64);
+                    left -= step;
+                    kprintln!("[genet] txprobe: alive, {} ms of {ms} ms (no register read)", ms - left);
+                    save_log();
+                }
+                None
+            }
+            gk::Op::WaitConsumer => {
+                let t = Timeout::ms(500);
+                let mut v = rd(st.reg) as u16;
+                while v != 1 && !t.expired() {
+                    delay_us(100);
+                    v = rd(st.reg) as u16;
+                }
+                Some(v as u32)
+            }
+            gk::Op::Event(_) => {
+                match st.name {
+                    "txp-frame" => {
+                        // SAFETY: the probe's own page, 4096 bytes, nobody else's.
+                        unsafe { core::ptr::copy_nonoverlapping(frame.as_ptr(), va as *mut u8, frame.len()) };
+                        crate::dma::sync(va, frame.len());
+                    }
+                    "txp-readback" => {
+                        dump_descriptor(0);
+                        dump_tx_registers("before the doorbell");
+                    }
+                    _ => dump_tx_registers("after the doorbell"),
+                }
+                None
+            }
+            _ => None,
+        };
+        // An SError taken because of the step: stop here and say so (the probe is not repeated).
+        if !super::serror_checkpoint_catch(st.name) {
+            kprintln!("[genet] txprobe: an SError was taken at step {n}/{total} {}: stopped", st.name);
+            save_log();
+            return;
+        }
+        match seen {
+            Some(v) => kprintln!("[genet] txprobe: step {n} {} ok (read {v:#x})", st.name),
+            None => kprintln!("[genet] txprobe: step {n} {} ok", st.name),
+        }
+    }
+    kprintln!("[genet] txprobe: done, the board lived through the frame and the pause after it");
+    save_log();
+}
+
 /// The 10-second line: whether the PHY sees a cable, what the controller's rings and counters say.
 fn report() {
     let phy = PHY_ADDR.load(Ordering::Relaxed);
     let bmsr = if phy == 0xff { None } else { mdio_read(phy, MII_BMSR) };
     kprintln!(
-        "[genet] link {} (PHY status {}), tx {} frames (dropped: {} link down, {} ring full, {} notx), rx {} frames ({} bad, {} irqs); tx ring cons {} prod {}, rx ring prod {}; umac cmd {:#x}",
+        "[genet] link {} (PHY status {}), tx {} frames (dropped: {} link down, {} ring full, {} notx, {} held by txprobe), rx {} frames ({} bad, {} irqs); tx ring cons {} prod {}, rx ring prod {}; umac cmd {:#x}",
         if LINK_UP.load(Ordering::Relaxed) { "up" } else { "down" },
         match bmsr {
             Some(v) => alloc::format!("{v:#06x}"),
@@ -909,6 +1108,7 @@ fn report() {
         TX_LINK_DOWN.load(Ordering::Relaxed),
         TX_RING_FULL.load(Ordering::Relaxed),
         TX_DISABLED.load(Ordering::Relaxed),
+        TX_HELD.load(Ordering::Relaxed),
         RX_FRAMES.load(Ordering::Relaxed),
         RX_BAD.load(Ordering::Relaxed),
         RX_IRQS.load(Ordering::Relaxed),

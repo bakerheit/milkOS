@@ -3,6 +3,12 @@
 ## Unreleased
 
 **Raspberry Pi 4** (docs/raspberry-pi.md)
+- The Ethernet freeze after the cable goes in now reaches the first transmit and the next real run can say what stops the board ("GENET transmit" in docs/raspberry-pi.md). The transmit path was
+  reviewed against the controller's register layout (descriptor words and flags, ring geometry, doorbell order, buffer address, UMAC bits, interrupt mask) and host-tested (`rpikit::genet`: the descriptor words, the ring end,
+  every transmit register's offset, the receive and transmit rings being twins); no defect was found, so nothing is claimed as the fix. The boot files show the stops are not all at the doorbell but all after the MAC's
+  transmitter was switched on. Before the first doorbell the log now has the descriptor and every transmit register read back, and the new `milk.genet=txprobe` runs one clean experiment: the link comes up with the MAC's
+  transmitter off and the network stack held back, then (each access logged and saved to the card first) the transmitter on for two seconds, one 60-byte broadcast frame of EtherType 0x88b5 (no IP) through descriptor 0, the doorbell and the wait for
+  the consumer index, so the file ends on exactly the access that stops the board. Untested on a board; qemu's raspi4b has no GENET (the option is accepted and skipped there).
 - A present transform for an HDMI panel whose scaler distorts the picture ("A panel whose scaler distorts the picture" in docs/raspberry-pi.md). The real board is a portrait 480x800 glass behind
   a scaler that takes only standard video modes (1024x768 at 60 Hz) and stretches that raster over the glass non-uniformly (x 0.469, y 1.04); the firmware's framebuffer does not stretch to the mode
   (it centres another shape with black bars: a 768x1280 framebuffer was a thin strip in a photo). So the kernel now draws the desktop on a *logical* framebuffer (`milk.fbsize=WxH`, cached RAM) and converts every

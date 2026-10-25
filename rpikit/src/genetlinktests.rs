@@ -105,8 +105,9 @@ mod options {
         assert_eq!((en("link-mac-rx-en").reg, en("link-mac-rx-en").op), (UMAC_CMD, Op::Set(CMD_RX_EN)));
         assert_eq!((en("link-mac-tx-en").reg, en("link-mac-tx-en").op), (UMAC_CMD, Op::Set(CMD_TX_EN)));
         assert_eq!((en("link-rgmii-link").reg, en("link-rgmii-link").op), (EXT_RGMII_OOB_CTRL, Op::Set(RGMII_LINK)));
-        // The interrupt step is the only gated one and it unmasks exactly the receive interrupts.
-        assert_eq!(LINK_UP.iter().filter(|s| s.gate != Gate::Always).count(), 1);
+        // Two steps are gated: the interrupt (it unmasks exactly the receive interrupts) and the transmitter's enable (`txprobe` does it by hand).
+        assert_eq!(LINK_UP.iter().filter(|s| s.gate != Gate::Always).count(), 2);
+        assert_eq!(en("link-mac-tx-en").gate, Gate::TxEn);
         assert_eq!(en("link-irq-unmask").gate, Gate::Irq);
         assert_eq!(en("link-irq-unmask").op, Op::Write(IRQ_RXDMA_DONE));
     }
@@ -122,6 +123,9 @@ mod options {
         assert_eq!(f(Options::default()), 2);
         assert_eq!(f(Options { norx: true, ..Options::default() }), 1);
         assert_eq!(f(Options { notx: true, ..Options::default() }), 1);
+        let t = Options { txprobe: true, probe: true, ..Options::default() };
+        assert_eq!(n(t), 6, "txprobe: the transmitter is left to the probe");
+        assert_eq!(f(t), 1, "txprobe: the stack sends nothing, so there is no first transmit");
     }
 
     #[test]

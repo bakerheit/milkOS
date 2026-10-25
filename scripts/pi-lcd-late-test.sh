@@ -93,7 +93,9 @@ before '^led: done, solid on$' '^lcd: probe [0-9]+/22 ' "boot 1: the boot is ove
 before '^milklog: ' '^lcd: probe [0-9]+/22 ' "boot 1: the log writer found the card's file before the first probe set-up"
 before '^lcd: milk.lcd=probe: the probe starts after' '^wm: desktop up' "boot 1: at the start of the boot the probe is only noted"
 before '^lcd: probe: the boot is over and the log is saved' '^lcd: probe: 22 set-ups' "boot 1: the probe says it was released by the boot"
-set +e; scripts/pi-readlog.sh "$T/log1.bin" > "$T/log1.txt" 2> "$T/log1.verdict"; set -e
+set +e; scripts/pi-readlog.sh "$T/log1.bin" > "$T/log1.raw" 2> "$T/log1.verdict"; set -e
+# every line of the card's log starts with its uptime stamp ("[   15.016] "): the checks below look at the text
+sed -E 's/^\[ *[0-9]+\.[0-9]+\] //' "$T/log1.raw" > "$T/log1.txt"
 A=$(grep -an -m1 '^lcd: probe [0-9]*/22 ' "$T/log1.txt" | cut -d: -f1 || true)
 D1=$(grep -an -m1 '^wm: desktop up' "$T/log1.txt" | cut -d: -f1 || true)
 L1=$(grep -an -m1 '^led: done, solid on' "$T/log1.txt" | cut -d: -f1 || true)
@@ -107,7 +109,7 @@ boot 2 "$T/card2.img" "$PROBE_OPTS" "wait@300:lcd: probe finished"
 stop
 before '^led: done, solid on$' '^lcd: probe [0-9]+/22 ' "boot 2: the boot is over before the first probe set-up (no log file to wait for)"
 before '^wm: desktop up' '^lcd: probe [0-9]+/22 ' "boot 2: the desktop is up before the first probe set-up"
-check '^milklog: not writing a boot log file: ' "boot 2: the card has no log file"
+check '^milklog: not writing (a|the) (boot )?log file: ' "boot 2: the card has no log file"
 check '^lcd: probe finished in [0-9]+ ms: 22 set-up\(s\) shown, 0 skipped' "boot 2: the probe runs through, nothing skipped"
 has 'lcd: .*timed out|KERNEL PANIC|kernel panic' && bad "boot 2: a time-out or a panic" || ok "boot 2: no SPI time-out, no panic"
 N=$(tr -d '\r' < "$LOG" | grep -Eac '^lcd: probe [0-9]+/22 .*: done in ')

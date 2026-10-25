@@ -96,6 +96,9 @@ enum Fail {
 
 struct Host {
     base: usize,
+    /// The card clock is slow (card identification, <= 400 kHz): the Arasan core loses two writes to one register that come
+    /// within two SD clocks of each other, so every register write is followed by a 10 us pause (Linux does the same).
+    slow: core::cell::Cell<bool>,
 }
 
 impl Host {
@@ -107,6 +110,10 @@ impl Host {
     fn w32(&self, off: usize, v: u32) {
         // SAFETY: as above.
         unsafe { write_volatile((phys_to_virt(self.base) + off) as *mut u32, v) }
+        if self.slow.get() {
+            let t = Timeout::us(10);
+            while !t.expired() {}
+        }
     }
 
     /// Wait until `done(register)` is true, at most `ms` milliseconds. The register value that
@@ -518,6 +525,7 @@ fn init_card(host: &Host, base_hz: u32) -> Option<Card> {
         );
     }
     let hz = host.set_clock(base_hz, XFER_HZ);
+    host.slow.set(false);
     if hz == 0 {
         kprintln!(
             "[sdhci] {:#x}: the transfer clock would not start",
@@ -543,7 +551,10 @@ fn init_card(host: &Host, base_hz: u32) -> Option<Card> {
 /// Look for an SD card on the controllers and register the first one found as `mmcblk0`.
 pub fn init() {
     for base in [EMMC2, EMMC1] {
-        let host = Host { base };
+        let host = Host {
+            base,
+            slow: core::cell::Cell::new(true),
+        };
         let version = host.r32(VERSION) >> 16;
         // An absent controller reads all ones (or zero); a real one says 0x0002 (spec 3.0) or less.
         if version == 0 || version == 0xffff {

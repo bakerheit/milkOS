@@ -32,6 +32,7 @@
 #           one) through the real crash path at a checkpoint, `milk.crashtest=dabt` is a real data abort right after a checkpoint, and
 #           `milk.serror=off` makes the checkpoints no-ops, `milk.serror=paranoid` adds one after every register write; the ESR decode, FAR/ELR/SPSR, the checkpoint attribution and the register write
 #           breadcrumbs are checked in the log, the checkpoint cost is bounded, and boot 1 proves the checkpoints are silent when nothing is pending.
+#   boot 20: `milk.pcie=probe` where the tree has no PCIe controller (qemu's raspi4b has none): acknowledged, skipped cleanly, the desktop runs; `milk.crashtest=serror-absorb` runs the SError-survival rules against pretend SErrors.
 # Offline, private images in a fresh /tmp folder, the qemu started here killed by PID.
 # TCG (no hvf for raspi), so a boot takes about 10-30 s.
 #
@@ -423,6 +424,20 @@ check '^serror: paranoid: checkpoints and write breadcrumbs on, and a checkpoint
 check '^\*\*\* KERNEL EXCEPTION: SError \*\*\*' "boot 19: the dump comes out of paranoid mode (the early boot ran through a checkpoint per register write)"
 check '^\[sdhci\] .*card ready' "boot 19: the SD card was brought up with a checkpoint after every register write"
 check "^  SError at checkpoint 'crashtest-serror' on cpu 0" "boot 19: the fake SError"
+
+# boot 20: milk.pcie=probe on a board with no PCIe controller in its tree (qemu's raspi4b): the probe mode is acknowledged, the root complex is
+# not touched (an access would be a bus error here), USB is skipped with its reason, and the desktop comes up and keeps running.
+python3 scripts/pi_dtb.py "$T/pcie.dtb" --cmdline "milk.pcie=probe milk.crashtest=serror-absorb"
+DTB_ARGS=(-dtb "$T/pcie.dtb")
+boot 20 "wait@300:wm: desktop up" \
+  "send:system" "wait:$P"
+stop
+check '^\[pcie\] milk.pcie=probe: a checkpoint after every register access' "boot 20: the probe mode is acknowledged"
+check '^\[pcie\] the device tree has no \(enabled\) PCIe controller' "boot 20: no controller in the tree: skipped cleanly"
+has '^pcie: step ' && bad "boot 20: a PCIe step ran without a controller" || ok "boot 20: no step ran"
+has 'KERNEL EXCEPTION|KERNEL PANIC|kernel panic' && bad "boot 20: an exception or a panic" || ok "boot 20: no exception, no panic"
+check 'wm: desktop up' "boot 20: the desktop is up"
+check '^serror: absorb self-test: ok ' "boot 20: an SError is survived at a pcie-* checkpoint (and under tolerate), refused elsewhere"
 
 # ---- boot 13 (only if MILK_REAL_DTB names a device tree from a real board's boot partition: it is not in the repository) ----
 if [ -n "${MILK_REAL_DTB:-}" ] && [ -r "$MILK_REAL_DTB" ]; then

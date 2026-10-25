@@ -35,11 +35,6 @@ fn run() {
     };
     let mut ctrls: Vec<xhci::Controller> = Vec::new();
     for dev in &devices {
-        #[cfg(feature = "raspi")]
-        if rpikit::pci::vendor(dev.id) == 0x1106 {
-            // The VIA VL805: the firmware may have to load its code first.
-            crate::rpi::pcie::notify_vl805(dev.bdf.bus, dev.bdf.dev, dev.bdf.func);
-        }
         let Some(bar) = dev.bars.first().filter(|b| b.size != 0) else {
             continue;
         };
@@ -47,7 +42,18 @@ fn run() {
             kprintln!("[usb] cannot map the controller's registers");
             continue;
         };
-        match xhci::Controller::new(va, bar.size as usize) {
+        let seen = crate::serror::absorbed();
+        let started = xhci::Controller::new(va, bar.size as usize);
+        // A rejected access during start-up is taken here and survived (checkpoint labels starting `pcie-`).
+        crate::serror::checkpoint("pcie-xhci-start");
+        if crate::serror::absorbed() != seen {
+            kprintln!("[usb] the controller rejected an access while starting (an SError, survived): USB is off");
+            // The controller may still be doing DMA into its rings: leave them allocated.
+            core::mem::forget(started);
+            core::mem::forget(ctrls);
+            return;
+        }
+        match started {
             Some(c) => ctrls.push(c),
             None => kprintln!(
                 "[usb] the controller at {:02x}:{:02x}.{} did not start",
@@ -62,8 +68,15 @@ fn run() {
     }
     // The polling loop: events, new and gone devices, key repeat. A few ms is below what a person notices.
     loop {
+        let seen = crate::serror::absorbed();
         for c in ctrls.iter_mut() {
             c.poll();
+        }
+        crate::serror::checkpoint("pcie-xhci-poll");
+        if crate::serror::absorbed() != seen {
+            kprintln!("[usb] a controller rejected an access (an SError, survived): USB is off");
+            core::mem::forget(ctrls);
+            return;
         }
         crate::sched::sleep_ms(4);
     }
@@ -71,26 +84,28 @@ fn run() {
 
 /// The board's host bridge and its xHCI controllers.
 fn find_controllers() -> Option<(Vec<pci::Device>, pci::Translate)> {
-    let host = host_bridge()?;
-    let devs: Vec<pci::Device> = pci::enumerate(&host)
-        .into_iter()
-        .filter(|d| d.is_xhci())
-        .collect();
+    let (devs, translate) = controllers()?;
     if devs.is_empty() {
         if crate::platform::RASPI {
             kprintln!("[usb] no xHCI controller found behind the PCIe root complex");
         }
         return None;
     }
-    Some((devs, host.translate()))
+    Some((devs, translate))
 }
 
+/// The Pi: the root complex is brought up, the VL805 told about and enabled in one go (`rpi/pcie.rs`).
 #[cfg(feature = "raspi")]
-fn host_bridge() -> Option<pci::Host> {
-    crate::rpi::pcie::host()
+fn controllers() -> Option<(Vec<pci::Device>, pci::Translate)> {
+    crate::rpi::pcie::bring_up()
 }
 
 #[cfg(not(feature = "raspi"))]
-fn host_bridge() -> Option<pci::Host> {
-    pci::virt_host()
+fn controllers() -> Option<(Vec<pci::Device>, pci::Translate)> {
+    let host = pci::virt_host()?;
+    let devs: Vec<pci::Device> = pci::enumerate(&host)
+        .into_iter()
+        .filter(|d| d.is_xhci())
+        .collect();
+    Some((devs, host.translate()))
 }

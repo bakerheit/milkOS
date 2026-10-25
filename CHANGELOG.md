@@ -3,6 +3,14 @@
 ## Unreleased
 
 **Raspberry Pi 4** (docs/raspberry-pi.md)
+- The PCIe + VL805 USB bring-up no longer takes the system down when the SoC rejects an access, and says which one it was. The first run on a real board
+  (rev 1.5, 8 GB) found the VL805 and then raised an SError that the log could only attribute to the next checkpoint (the mailbox call's), because the bring-up had no
+  checkpoint of its own. Now the bring-up is a table of steps (`rpikit::pcie::STEPS`, host-tested for order and labels) and every step ends with a checkpoint; a rejected access at a
+  `pcie-*` checkpoint (also during the xHCI start and polling, and inside the firmware call) is survived: logged with the register writes, the step reported
+  `FAILED`, the controller held in reset, USB skipped, the desktop goes on. The most likely cause is fixed by order: the firmware's `NOTIFY_XHCI_RESET` for the VL805 is now made with memory
+  decoding and bus mastering still off (`pci::enumerate_deferred` leaves the command registers alone), the chip must answer with its id afterwards (its BARs are put back if the reset
+  wiped them), and the first read of the controller's BAR is checked before the xHCI driver starts. `milk.pcie=probe` adds a checkpoint after every register access, a `pcie: step N name ok` line per step and tries all four orders
+  of the handshake (`rpikit::pcie::ORDERS`), logging which work. `pi-qemu-test` boot 20 boots with `milk.pcie=probe` on a tree without PCIe and checks it skips cleanly.
 - The 3.5-inch display can no longer hold up the boot or the SD boot log (a `milk.lcd=probe` boot showed "long pulse, one pulse, then nothing" for 100 s
   and the log stayed blank: the probe ran synchronously before everything else). `milk.lcd=probe` now only notes itself at the start of the boot and runs
   last, on its own low-priority thread, once the boot is over (LED solid on, desktop up) and the boot log is saved to the card (or 8 s after the boot is over if

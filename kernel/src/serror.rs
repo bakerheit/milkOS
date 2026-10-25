@@ -202,6 +202,60 @@ pub fn checkpoint(label: &'static str) {
     crate::sync::irq_restore(flags);
 }
 
+/// SErrors taken and survived (see [`absorb`]).
+static ABSORBED: AtomicU32 = AtomicU32::new(0);
+/// The thread (tid + 1) whose checkpoints may absorb an SError whatever their label, 0 for none.
+static TOLERANT: AtomicU32 = AtomicU32::new(0);
+
+/// How many SErrors were absorbed so far: a driver compares it before and after a step to learn whether the
+/// step's accesses were rejected.
+pub fn absorbed() -> u32 {
+    ABSORBED.load(Ordering::Acquire)
+}
+
+/// While the returned guard lives, an SError taken at *any* checkpoint of the calling thread is survived
+/// (used around a firmware call whose own checkpoint is not ours). Checkpoints labelled `pcie-` always absorb.
+#[must_use]
+#[cfg_attr(not(feature = "raspi"), allow(dead_code))]
+pub fn tolerate() -> Tolerate {
+    TOLERANT.store(crate::sched::current_tid() + 1, Ordering::Release);
+    Tolerate
+}
+
+/// See [`tolerate`].
+#[cfg_attr(not(feature = "raspi"), allow(dead_code))]
+pub struct Tolerate;
+
+impl Drop for Tolerate {
+    fn drop(&mut self) {
+        TOLERANT.store(0, Ordering::Release);
+    }
+}
+
+/// Called by the SError vector: if this one was taken at a checkpoint that may survive it, say what is known
+/// (the attribution and the register writes, as in a crash dump), count it and return `true` so the vector
+/// returns to the checkpoint's caller. A pending SError is consumed by being taken, so the code after the
+/// checkpoint runs clean.
+pub fn absorb(cpu: usize, vector: usize, esr: u64) -> bool {
+    if !enabled() || !(4..8).contains(&vector) || vector % 4 != 3 {
+        return false;
+    }
+    let (_, attempt, _, checking) = state(cpu);
+    let Some(label) = attempt.filter(|_| checking) else {
+        return false;
+    };
+    let tolerant = TOLERANT.load(Ordering::Acquire) == crate::sched::current_tid() + 1;
+    if !(label.starts_with("pcie-") || tolerant) {
+        return false;
+    }
+    kprintln!(
+        "serror: absorbed an SError at checkpoint '{label}' on cpu {cpu} (ESR_EL1 {esr:#x}); the thread goes on"
+    );
+    report(cpu, vector);
+    ABSORBED.fetch_add(1, Ordering::AcqRel);
+    true
+}
+
 /// Remember a register write on this CPU (virtual address and value), for the dump. Hold the returned guard
 /// across the write itself (`let _c = write_guard(addr, v); write_volatile(..)`): in `milk.serror=paranoid` its
 /// drop is a checkpoint right after the write, so a bus error for that register is taken before anything else
@@ -521,4 +575,37 @@ pub fn simulate() -> ! {
     frame.spsr = 0x3c5;
     // Vector 7: current EL, SP_ELx, SError.
     crate::exceptions::crash(&frame, 7, "SError")
+}
+
+/// `milk.crashtest=serror-absorb`: run [`absorb`] against pretend SErrors (qemu cannot raise a real one) and say
+/// what it decided, then let the boot go on: an SError at a checkpoint that is not the bring-up's must not be
+/// survived, one at a `pcie-*` checkpoint must, and so must any checkpoint of a thread that called [`tolerate`].
+pub fn simulate_absorb() {
+    let cpu = percpu::id();
+    let esr = rpikit::esr::serror_esr(0);
+    let at = |label: &'static str| {
+        CPUS[cpu].attempt.set(label);
+        CPUS[cpu].checking.store(true, Ordering::Relaxed);
+    };
+    let before = absorbed();
+    at("crashtest-serror");
+    let refused = !absorb(cpu, 7, esr);
+    at("pcie-crashtest");
+    let pcie = absorb(cpu, 7, esr);
+    at("mbox-call");
+    let alone = !absorb(cpu, 7, esr);
+    let tolerated = {
+        let _t = tolerate();
+        absorb(cpu, 7, esr)
+    };
+    let after = !absorb(cpu, 7, esr);
+    // Taken outside a checkpoint (the first eret to EL0): never survived.
+    CPUS[cpu].checking.store(false, Ordering::Relaxed);
+    let outside = !absorb(cpu, 7, esr);
+    let counted = absorbed() - before == 2;
+    let ok = refused && pcie && alone && tolerated && after && outside && counted;
+    kprintln!(
+        "serror: absorb self-test: {} (other label refused {refused}, pcie-* survived {pcie}, mbox-call alone refused {alone}, tolerated survived {tolerated}, refused again after {after}, outside a checkpoint refused {outside}, counted {counted})",
+        if ok { "ok" } else { "FAILED" }
+    );
 }

@@ -339,7 +339,7 @@ check '^lcd: probe 16/22 ili9486 4 MHz mode 3 DC24 RST25: start .*milk.lcd_spi_m
 check '^lcd: probe 19/22 ili9486 4 MHz mode 0 DC22 RST27: start .*milk.lcd_dc=22 milk.lcd_rst=27;.*backlight high: GPIO18$' "boot 14: other pins (27 is the reset, so only 18 is the backlight)"
 check '^lcd: probe 22/22 ili9486p 4 MHz mode 0 DC25 RST24: start .*milk.lcd_dc=25 milk.lcd_rst=24' "boot 14: the last set-up"
 check '^lcd: probe 1/22 .*backlight high: GPIO18 GPIO27$' "boot 14: the free backlight pins are driven high"
-check '^lcd: probe finished in [0-9]+ ms: 22 set-up(s) shown, 0 skipped' "boot 14: probe ends, nothing skipped"
+check '^lcd: probe finished in [0-9]+ ms: 22 set-up\(s\) shown, 0 skipped' "boot 14: probe ends, nothing skipped"
 has 'lcd: probe [0-9]+/22 .*: skipped after|lcd: .*timed out' && bad "boot 14: a set-up was skipped or timed out" || ok "boot 14: nothing skipped, no SPI time-out"
 has '^lcd: panel initialised' && bad "boot 14: a panel was left running" || ok "boot 14: no panel after the probe"
 has 'KERNEL PANIC|kernel panic' && bad "boot 14: a kernel panic" || ok "boot 14: no panic"

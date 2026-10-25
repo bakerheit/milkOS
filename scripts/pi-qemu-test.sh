@@ -62,6 +62,8 @@ boot() {
   python3 scripts/serial_drive.py "$SOCK" "$LOG" "$@" "done:$T/done$n" &
   D=$!
   for _ in $(seq 1500); do [ -e "$T/done$n" ] && break; kill -0 "$QPID" 2>/dev/null || break; sleep 0.2; done
+  # A machine that powers itself off ends the loop above before the script has written its marker.
+  for _ in 1 2 3 4 5 6 7 8 9 10; do [ -e "$T/done$n" ] && break; sleep 0.3; done
   [ -e "$T/done$n" ] || bad "boot $n: the serial script did not finish (see $LOG)"
 }
 stop() {

@@ -8,13 +8,14 @@ kernel's boot log writer (kernel/src/rpi/logfile.rs, docs/raspberry-pi.md) has a
 OS's boot partition: an MBR whose first partition is FAT32 (type 0x0c), 512-byte sectors, one sector per cluster,
 a root directory with a short-name file, a file with a long name (long-name entries then its 8.3 alias), a deleted
 entry, a volume label, a big file full of recognisable noise (so "nothing else was written" is checkable), and the
-pre-created log file: a header line, then spaces.
+pre-created log file: a header line, then spaces (what scripts/pi-logfile.sh makes).
 
   --fragment      the log file's clusters are scattered in runs of 8 with another file's clusters between
   --defect KIND   a card the writer must refuse and leave untouched:
                   loop (the chain runs back into itself), short (the chain ends early), long (the chain runs on
                   past the size), range (a cluster number outside the volume), free (a chain through a free
-                  cluster), nofile (no MILKLOG.TXT), nombr (no partition table), tiny (the size is under 4 KiB)
+                  cluster), nofile (no MILKLOG.TXT), nombr (no partition table), tiny (the size is under 4 KiB),
+                  v1 (the file holds a format 1 log), foreign (the file holds someone's text)
   --layout FILE   write a JSON description: the partition, the data area, and the log file's extents, which
                   is how a test knows which sectors the kernel was allowed to change
 
@@ -151,13 +152,18 @@ def build(a):
     # The log file.
     size = a.log_size if a.defect != "tiny" else 3000
     n = -(-size // SECTOR)
-    header = b"MILKLOG.TXT: the milkOS boot log goes here (the kernel overwrites this file in place; nothing below yet).\n"
+    header = b"MILKLOG.TXT: the milkOS log goes here (the kernel overwrites this file in place; nothing below yet).\n"
+    if a.defect == "v1":
+        # A format 1 log from the first version of the writer: somebody's earlier log, not ours to overwrite.
+        header = b"MILKLOG 1 boot=0000abcd\nmilkOS 0.2.0 (build abc1234) for the Raspberry Pi 4\n--------\nboot: entered at EL2\n"
+    elif a.defect == "foreign":
+        header = b"This file has been used for something else. Do not overwrite it.\n"
     content = (header + b" " * size)[:size]
     if a.fragment:
         log = []
         filler = []
         while len(log) < n:
-            log += alloc(min(8, n - len(log)))
+            log += alloc(min(a.piece, n - len(log)))
             filler += alloc(3)
         chain(filler)
         for c in filler:
@@ -259,8 +265,9 @@ def main():
     p.add_argument("out")
     p.add_argument("--size", type=size_arg, default=64 * 1024 * 1024)
     p.add_argument("--log-size", type=size_arg, default=256 * 1024)
+    p.add_argument("--piece", type=int, default=8, help="with --fragment: clusters per piece of the log file (default 8)")
     p.add_argument("--fragment", action="store_true")
-    p.add_argument("--defect", choices=["loop", "short", "long", "range", "free", "nofile", "nombr", "tiny"])
+    p.add_argument("--defect", choices=["loop", "short", "long", "range", "free", "nofile", "nombr", "tiny", "v1", "foreign"])
     p.add_argument("--layout")
     a = p.parse_args()
     if a.size & (a.size - 1):

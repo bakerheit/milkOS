@@ -74,6 +74,9 @@ static USED: [AtomicBool; MAX] = [const { AtomicBool::new(false) }; MAX];
 static PUBLISHED: AtomicBool = AtomicBool::new(false);
 
 fn push(n: usize, b: &[u8]) {
+    // The SD card log (rpi/logbuf.rs) gets what runs on a pseudo-terminal prints.
+    #[cfg(feature = "raspi")]
+    crate::rpi::logbuf::pty(n, b);
     {
         let mut q = OUT[n].lock();
         let room = OUT_CAP.saturating_sub(q.len());

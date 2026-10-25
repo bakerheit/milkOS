@@ -41,6 +41,9 @@ fn main() {
     println!("cargo:rustc-env=MILKOS_VERSION={version}");
     println!("cargo:rustc-env=MILKOS_VERSION_NUM={number}");
     println!("cargo:rustc-env=MILKOS_BUILD={build}");
+    // The git commit the tree is at, also for a release build (the SD card log's boot banner carries it).
+    let git_id = git_build_id(repo).unwrap_or_else(|| "unknown".to_string());
+    println!("cargo:rustc-env=MILKOS_GIT={git_id}");
     println!("cargo:rerun-if-changed={}", repo.join("VERSION").display());
     println!("cargo:rerun-if-env-changed=MILKOS_RELEASE");
     // User programs first: the initramfs packs them (initramfs.list).

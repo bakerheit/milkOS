@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
-# Print the boot log out of MILKLOG.TXT (copied off the SD card, or read from the mounted card) without the padding,
-# and say whether the kernel finished saving it (the end marker). The log goes to stdout, the verdict to stderr:
+# Read the milkOS SD card log (MILKLOG.TXT, copied off the card or read from the mounted card):
 #
-#   scripts/pi-readlog.sh PATH-TO-MILKLOG.TXT > boot.log
+#   scripts/pi-readlog.sh PATH                 the whole log, every boot in order
+#   scripts/pi-readlog.sh PATH --last          just the newest boot
+#   scripts/pi-readlog.sh PATH --boot N        just boot N
+#   scripts/pi-readlog.sh PATH --list          one line per boot: where it starts, lines, uptime, build, how it ended
+#                                              (clean shutdown, restart, crash, or a power cut / reset)
+#   scripts/pi-readlog.sh PATH --tail 200      only the last 200 lines (of the whole log, or of --last / --boot N)
 #
-# Read only. Exit status 0: marker there; 1: log without marker (cut off); 2: not a milkOS log / unreadable.
+# The log goes to stdout, notes and warnings (the ring wrapped, damaged sectors, how the newest boot ended) to stderr:
+#   scripts/pi-readlog.sh /Volumes/BOOT/MILKLOG.TXT --last > last-boot.log
+# Read only. Exit status 0: read and whole; 1: read, with a warning (wrapped, damage, an old format 1 file without its
+# end marker); 2: not a milkOS log / unreadable. The format is described in rpikit/src/milklog.rs.
 set -euo pipefail
-cd "$(dirname "$0")/.."
-[ $# -eq 1 ] || { echo "usage: scripts/pi-readlog.sh PATH-TO-MILKLOG.TXT" >&2; exit 2; }
-exec python3 -I scripts/pi_readlog.py "$1"
+[ $# -ge 1 ] || { echo "usage: scripts/pi-readlog.sh PATH [--all | --last | --boot N | --list] [--tail N]" >&2; exit 2; }
+# No cd: PATH is relative to where this was run from.
+exec python3 -I "$(dirname "$0")/pi_readlog.py" "$@"

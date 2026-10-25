@@ -238,6 +238,9 @@ pub extern "C" fn kmain() -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
+    // The SD card log stops rate limiting: every line of what follows is kept.
+    #[cfg(feature = "raspi")]
+    rpi::logbuf::emergency();
     kprintln!("\n*** KERNEL PANIC ***\n{info}");
     #[cfg(feature = "raspi")]
     rpi::led::note_panic(info);

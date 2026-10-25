@@ -1,12 +1,10 @@
-//! Host tests for `fat` (finding the log file on a FAT32 card) and `logimg` (the file's layout): a FAT32
+//! Host tests for `fat` (finding the log file on a FAT32 card): a FAT32
 //! image built here, sparse so a card with 128-sector clusters costs nothing, with long-name entries mixed in,
 //! fragmented chains, loops, out-of-range clusters, truncated chains and plain garbage.
 
 use crate::fat::{self, Error, Extent, LogFile, Partition, SECTOR, Sectors, Volume, short_name};
-use crate::logimg::{self, LogImage, MARKER_MAX, OUT_SECTORS};
 use std::collections::BTreeMap;
 use std::format;
-use std::vec;
 use std::vec::Vec;
 
 const PART_START: u64 = 2048;
@@ -397,7 +395,7 @@ fn refuses_a_chain_that_is_too_short_or_too_long() {
 
 #[test]
 fn refuses_files_of_a_bad_size() {
-    for size in [0u32, 1, 511, 4095, 4 * 1024 * 1024 + 1, u32::MAX] {
+    for size in [0u32, 1, 511, 4095, 32 * 1024 * 1024 + 1, u32::MAX] {
         let mut fs = Fs::new(1);
         fs.file(b"MILKLOG TXT", 0x20, 10, size);
         fs.chain(&(10..30).collect::<Vec<_>>());
@@ -407,8 +405,8 @@ fn refuses_files_of_a_bad_size() {
         );
     }
     let mut fs = Fs::new(1);
-    fs.log(4 * 1024 * 1024, &(10..10 + 8192).collect::<Vec<_>>());
-    assert!(locate(&mut fs).is_ok(), "exactly 4 MiB is taken");
+    fs.log(32 * 1024 * 1024, &(10..10 + 65536).collect::<Vec<_>>());
+    assert!(locate(&mut fs).is_ok(), "exactly 32 MiB is taken");
 }
 
 #[test]
@@ -676,183 +674,6 @@ fn garbage_never_panics_and_never_names_a_sector_outside_the_data_area() {
         accepted > 100,
         "the mutations should leave some cards valid ({accepted})"
     );
-}
-
-// ---- the log file's layout ----------------------------------------------------------------------------
-
-/// A file as the card holds it: spaces after a header line, like scripts/pi-logfile.sh makes.
-struct Model {
-    bytes: Vec<u8>,
-}
-
-impl Model {
-    fn new(sectors: u32) -> Model {
-        let mut bytes = vec![b' '; sectors as usize * SECTOR];
-        let head = b"MILKLOG.TXT: not written yet\n";
-        bytes[..head.len()].copy_from_slice(head);
-        Model { bytes }
-    }
-    fn apply(&mut self, first: u32, count: u32, out: &[u8]) {
-        let a = first as usize * SECTOR;
-        let n = count as usize * SECTOR;
-        self.bytes[a..a + n].copy_from_slice(&out[..n]);
-    }
-}
-
-/// Offer `text` to the image until it is all taken; apply each round to the model.
-fn feed(img: &mut LogImage, m: &mut Model, text: &[u8]) -> usize {
-    let sectors = (m.bytes.len() / SECTOR) as u32;
-    let mut out = vec![0u8; OUT_SECTORS * SECTOR];
-    let mut rest = text;
-    let mut rounds = 0;
-    loop {
-        let p = img.prepare(rest, sectors, &mut out).expect("prepare");
-        assert!(p.count as usize <= OUT_SECTORS);
-        assert!(p.first + p.count <= sectors, "write beyond the file");
-        m.apply(p.first, p.count, &out);
-        img.commit(&p);
-        rounds += 1;
-        rest = &rest[p.consumed.min(rest.len())..];
-        if rest.is_empty() {
-            return rounds;
-        }
-        assert!(rounds < 1000);
-    }
-}
-
-#[test]
-fn the_text_and_one_marker_end_up_in_the_file() {
-    let mut img = LogImage::new(0xabcd);
-    let mut m = Model::new(64);
-    let mut want = Vec::new();
-    for i in 0..300 {
-        let line = format!("line {i}: the quick brown fox jumps over the lazy dog\n");
-        want.extend_from_slice(line.as_bytes());
-        feed(&mut img, &mut m, line.as_bytes());
-        let (end, boot, flush, bytes, full) = logimg::find_marker(&m.bytes).expect("a marker");
-        assert_eq!(&m.bytes[..end], &want[..], "after line {i}");
-        assert_eq!(
-            (boot, flush, bytes, full),
-            (0xabcd, i as u32 + 1, want.len() as u64, false)
-        );
-        // Exactly one marker for this boot, at the end.
-        let n = m
-            .bytes
-            .windows(logimg::MARKER_START.len())
-            .filter(|w| *w == logimg::MARKER_START)
-            .count();
-        assert_eq!(n, 1);
-    }
-    assert!(want.len() > 10_000);
-    assert_eq!(img.pos(), want.len() as u64);
-}
-
-#[test]
-fn a_big_chunk_goes_in_rounds_and_a_flush_with_no_text_just_refreshes_the_marker() {
-    let mut img = LogImage::new(1);
-    let mut m = Model::new(64);
-    let text: Vec<u8> = (0..20_000u32).map(|i| b'a' + (i % 26) as u8).collect();
-    let rounds = feed(&mut img, &mut m, &text);
-    assert!(rounds >= 3, "{rounds}");
-    let (end, _, _, bytes, _) = logimg::find_marker(&m.bytes).unwrap();
-    assert_eq!(&m.bytes[..end], &text[..]);
-    assert_eq!(bytes, 20_000);
-    feed(&mut img, &mut m, b"");
-    let (end2, _, flush, _, _) = logimg::find_marker(&m.bytes).unwrap();
-    assert_eq!(end2, end);
-    assert_eq!(flush, rounds as u32 + 1);
-}
-
-#[test]
-fn a_flush_writes_only_the_sectors_at_the_end() {
-    let mut img = LogImage::new(2);
-    let mut m = Model::new(64);
-    feed(&mut img, &mut m, &vec![b'x'; 3000]);
-    let mut out = vec![0u8; OUT_SECTORS * SECTOR];
-    let p = img.prepare(b"more\n", 64, &mut out).unwrap();
-    // 3000 bytes of text end in sector 5 (3000 / 512): the next flush starts there.
-    assert_eq!(p.first, 5);
-    assert_eq!(p.count, 1);
-    // The text before is unchanged where it is not rewritten: the first rewritten sector starts with the old tail.
-    assert_eq!(&out[..3000 % 512], &vec![b'x'; 3000 % 512][..]);
-}
-
-#[test]
-fn a_full_file_keeps_its_marker_and_says_so() {
-    let mut img = LogImage::new(3);
-    let mut m = Model::new(8); // 4096 bytes
-    let text = vec![b'y'; 10_000];
-    feed(&mut img, &mut m, &text);
-    let (end, _, _, bytes, full) = logimg::find_marker(&m.bytes).unwrap();
-    assert!(full && img.is_full());
-    assert_eq!(bytes as usize, end);
-    assert!(
-        end + MARKER_MAX <= 4096,
-        "the marker fits inside the file ({end})"
-    );
-    assert!(m.bytes[..end].iter().all(|&b| b == b'y'));
-    // More text is dropped, never written.
-    feed(&mut img, &mut m, b"later\n");
-    assert_eq!(m.bytes.len(), 4096);
-    let (end2, _, _, _, full2) = logimg::find_marker(&m.bytes).unwrap();
-    assert!(full2);
-    assert_eq!(end2, end);
-}
-
-#[test]
-fn a_stale_marker_from_an_earlier_boot_is_behind_ours() {
-    let mut m = Model::new(64);
-    let mut old = LogImage::new(0x1111);
-    feed(&mut old, &mut m, &vec![b'o'; 9000]);
-    let mut new = LogImage::new(0x2222);
-    feed(&mut new, &mut m, b"new boot\n");
-    let (end, boot, ..) = logimg::find_marker(&m.bytes).unwrap();
-    assert_eq!(boot, 0x2222, "the first marker is the new boot's");
-    assert_eq!(&m.bytes[..end], b"new boot\n");
-    // The old marker is still further down the file: the boot ids tell them apart.
-    let rest = &m.bytes[end + 10..];
-    assert!(logimg::find_marker(rest).is_some_and(|(_, b, ..)| b == 0x1111));
-}
-
-#[test]
-fn prepare_refuses_what_cannot_work() {
-    let img = LogImage::new(4);
-    let mut out = vec![0u8; OUT_SECTORS * SECTOR];
-    assert!(
-        img.prepare(b"x", 1, &mut out).is_none(),
-        "a file of one sector"
-    );
-    assert!(img.prepare(b"x", 0, &mut out).is_none());
-    assert!(
-        img.prepare(b"x", 64, &mut out[..SECTOR]).is_none(),
-        "a one-sector buffer"
-    );
-    assert!(img.prepare(b"x", 64, &mut []).is_none());
-    assert!(img.prepare(b"x", 64, &mut out).is_some());
-    // Arbitrary text, arbitrary file sizes, small buffers: never writes outside, never panics.
-    let mut rng = Rng(77);
-    for _ in 0..500 {
-        let sectors = 2 + (rng.next() % 40) as u32;
-        let mut m = Model::new(sectors);
-        let mut img = LogImage::new(rng.next() as u32);
-        for _ in 0..30 {
-            let n = (rng.next() % 3000) as usize;
-            let text: Vec<u8> = (0..n).map(|_| rng.next() as u8).collect();
-            let mut out = vec![0u8; (2 + rng.next() % 15) as usize * SECTOR];
-            let Some(p) = img.prepare(&text, sectors, &mut out) else {
-                continue;
-            };
-            assert!(
-                p.first + p.count <= sectors,
-                "{sectors} {} {}",
-                p.first,
-                p.count
-            );
-            assert!(p.count as usize * SECTOR <= out.len());
-            m.apply(p.first, p.count, &out);
-            img.commit(&p);
-        }
-    }
 }
 
 #[test]

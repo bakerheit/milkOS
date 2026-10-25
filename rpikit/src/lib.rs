@@ -7,7 +7,9 @@
 //! * [`esr`]: ESR_EL1 decoded for the exception dump (exception class, abort and SError syndromes).
 //! * [`genet`]: Ethernet descriptor words and autonegotiation results.
 //! * [`fat`]: finding one pre-created file on a FAT32 boot partition and its sectors (the boot log file).
-//! * [`logimg`]: the boot log file's layout (header, end marker, padding) and how a flush builds its sectors.
+//! * [`milklog`]: the SD card log file's layout (format 2: a header and a ring of sectors holding many boots), how a
+//!   flush builds its sectors, and how the end of the text is found again after a power cut.
+//! * [`logintake`]: what goes into the log: line assembly, the rate cap, the uptime stamp.
 //! * [`ledcode`]: the ACT LED boot progress codes (pulses per milestone, the start marker).
 //! * [`ledcrash`]: the ACT LED crash cycle (boot stage, exception class, PC, fault address as counted pulses).
 //! * [`mailbox`]: VideoCore property-interface messages (framebuffer, clocks, board info).
@@ -35,7 +37,8 @@ pub mod ledcrash;
 pub mod lcd;
 pub mod lcdbudget;
 pub mod lcdprobe;
-pub mod logimg;
+pub mod logintake;
+pub mod milklog;
 pub mod mailbox;
 pub mod pci;
 pub mod sd;
@@ -49,6 +52,8 @@ mod fattests;
 mod lcdsim;
 #[cfg(test)]
 mod lcdtests;
+#[cfg(test)]
+mod logtests;
 #[cfg(test)]
 mod testpng;
 #[cfg(test)]

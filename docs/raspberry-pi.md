@@ -19,7 +19,7 @@ Files: `kernel/src/platform.rs` (the board table), `kernel/src/el.S` (EL2 to EL1
 | Boot at EL2, drop to EL1, MMU on, higher-half kernel, 4 CPUs through the firmware's spin table | **runs** on qemu raspi4b (TCG); the EL2 and spin-table paths are exactly what the real firmware does |
 | PL011 console, GIC-400, generic timer, scheduler, userspace, the shell, the whole desktop | **runs** on qemu raspi4b |
 | Firmware mailbox, framebuffer (format, pitch and address from the firmware's answer) | **runs** on qemu raspi4b; the answer's shape is unit-tested against hostile values |
-| The boot log in a file on the card (`MILKLOG.TXT`, "The boot log in a file") | **runs** on qemu raspi4b against generated FAT32 cards (fragmented file, hostile cards that must be refused untouched, a crash flush; every other sector of the image is checked unchanged); the real SD controller, real cards and timing are untested |
+| The log on the card (`MILKLOG.TXT`, "Reading the log": everything, for the whole session, across boots) | **runs** on qemu raspi4b against generated FAT32 cards (three boots in a row on an 8 MiB file with a power cut, a crash and a clean shutdown; a 64 KiB file that wraps; a fragmented file; hostile cards that must be refused untouched; every other sector of the image is checked unchanged); the ring layout, the recovery after power cuts and the rate cap are host-tested with fuzzing; the real SD controller, real cards and timing are untested |
 | Boot log and crash screen on HDMI, ACT LED codes, sign-of-life band | **runs** on qemu (screendumps are checked by the test; qemu models the GPIO block, so the test samples the LED pin: marker and codes, solid on, flashing after a crash); the LED's brightness and timing on a real board, and real HDMI scan-out, are untested |
 | SD card (SDHCI, polled PIO), as `/dev/mmcblk0`, milkfs on it | **runs** on qemu (its EMMC controller); **untested** on EMMC2 of a real board |
 | RAM from the device tree, several banks and holes | **runs** on qemu (two banks and a hole, the GPU's); 4 GB / 8 GB layouts are unit-tested and the allocator above 4 GiB is tested on qemu virt |
@@ -38,7 +38,9 @@ so those paths are skipped there) and logs what it reads; the first boot on a re
 scripts/pi-run.sh               # a window (cocoa) and the serial console on this terminal
 scripts/pi-run.sh headless      # serial only
 scripts/pi-qemu-test.sh         # the test: twelve boots, see its header (a few minutes)
-scripts/pi-log-test.sh          # the boot log in a file on a generated FAT32 card: ten boots, see its header
+scripts/pi-log-test.sh          # the SD card log on a fragmented file and on cards that must be refused: twelve boots, see its header
+scripts/pi-log-multiboot-test.sh  # the SD card log across boots: three boots on an 8 MiB file, then a 64 KiB file that wraps
+scripts/pi-readlog-test.sh      # the Mac-side log reader on made-up files (no VM)
 ```
 
 `-M raspi4b` runs on TCG (`-accel hvf` does not work for the Raspberry Pi machines), so boots take a
@@ -75,10 +77,11 @@ them, so every existing option works unchanged:
 | `milk.sdwrite=1` | allow writes to the SD card (`/dev/mmcblk0` is read-only otherwise: a card that also boots Raspberry Pi OS must not be written by accident; Disk Utility, `disks` and milkfs all see it read-only) |
 | `milk.disable=pcie,usb,genet,sdhci,rng` | start without a driver that misbehaves on a real board (edit `cmdline.txt`, no rebuild): `pcie` (and with it USB), `usb`, `genet`, `sdhci`, `rng` |
 | `milk.fbscale=N` | magnify the boot log and crash screen font N times (default 1; 2 from 1600 px wide) |
-| `milk.ledcodes=0` | no ACT LED progress codes (the LED just turns on at the start of `kmain`; the `led: stage` log lines stay; the "log saved" signal is off too). Default on; the codes add about 9 s to a boot |
+| `milk.ledcodes=0` | no ACT LED progress codes (the LED just turns on at the start of `kmain`; the `led: stage` log lines stay; the "log saved" signal and the log error blink are off too). Default on; the codes add about 9 s to a boot |
 | `milk.lcd=ili9486` (or `ili9486p`, `ili9486p18`, `ili9488`, `st7796`, `ili9481`, `r61581`, `hx8357`, `ili9341`, `st7789`) | the 3.5-inch SPI display on the GPIO header (off without it; many more options: "3.5-inch SPI display"); `milk.lcd=probe` tries them all |
 | `milk.serror=trace` / `paranoid` / `off` | the SError checkpoints and the register write breadcrumbs ("Reading a crash"); `trace` is the default on the Pi image, `off` makes them no-ops, `paranoid` adds a checkpoint after every register write of the Pi drivers (slow; pins an SError to one register) |
 | `milk.crashtest=serror` / `dabt` | the exception dump instead of a panic, right after the display is up: a fake SError taken at a checkpoint (qemu cannot raise a real one), or a real data abort (a store to an unmapped address) |
+| `milk.logstorm=N` | once the boot is over, print N lines as fast as the console takes them: tests the SD card log's rate cap (`pi-log-multiboot-test`) |
 | `milk.crashtest=early` / `late` | panic on purpose right after the display is up / once the desktop has been up 8 s (tests the crash screens); `late-off` / `late-reset`: the desktop's Shut Down / Restart after 5 s (tests the power paths) |
 
 ## Putting it on a card
@@ -87,12 +90,12 @@ The kernel is one file the firmware loads. These are **your** steps; nothing in 
 a card or a disk.
 
 1. `scripts/pi-bootdir.sh /tmp/milkos-boot` builds the release kernel and puts `milkos8.img`,
-   `config.milkos.txt`, `cmdline.milkos.txt` and the blank log file `MILKLOG.TXT` in that folder (it refuses a folder on a mounted volume).
+   `config.milkos.txt`, `cmdline.milkos.txt` and the blank log file `MILKLOG.TXT` (8 MiB) in that folder (it refuses a folder on a mounted volume).
 2. On the card's boot partition (the FAT one with `start4.elf`, `fixup4.dat`, `config.txt`): **keep a copy
    of `config.txt`**, copy `milkos8.img` next to the firmware's files, and make `config.txt` say
    what `config.milkos.txt` says: `arm_64bit=1`, `kernel=milkos8.img`, `hdmi_force_hotplug=1`, `max_framebuffers=1`
    and **no `dtoverlay=vc4-kms-v3d`** (milkOS draws on the firmware's framebuffer, not on a KMS display).
-   Copy `MILKLOG.TXT` onto the same partition too (an ordinary copy, name in capitals: "The boot log in a file").
+   Copy `MILKLOG.TXT` onto the same partition too (an ordinary copy, name in capitals; once: it keeps the log of every boot: "Reading the log").
    `cmdline.txt` can stay as it is (the kernel only looks at `milk.` words) or be replaced. The card is **read-only** to milkOS unless you add `milk.sdwrite=1` (so booting it cannot damage the other system; with the stock card there is no milkfs partition to write to anyway).
 3. Put the card in a Pi 4 with an HDMI screen (or, with `milk.lcd=ili9486` in `cmdline.txt`, the 3.5-inch SPI display on the
    header: "3.5-inch SPI display"). To go back: restore the old `config.txt`. **Boot options live in `cmdline.txt`**: one line, `milk.<name>=<value>` words separated by
@@ -301,49 +304,138 @@ every boot (`serror: a checkpoint costs N ns`). (7) Photograph the last lines of
 
 ## The boot log in a file
 
-A board with no serial cable and a screen that does not light up still has an SD card that fits a Mac. The kernel
-saves its log (the text that goes to the serial port and the screens, from the first line) into a file on the
-card's FAT boot partition, **`MILKLOG.TXT`**, which you make before the run:
+A board with no serial cable and a screen that does not light up still has an SD card that fits a Mac. The kernel writes **everything
+it says** into a file on the card's FAT boot partition, **`MILKLOG.TXT`**, for the whole session and **across boots**: every boot
+appends after the one before, so after a bad run you can pop the card into the Mac and read what happened, including the boot
+before the one that went wrong.
 
-1. `scripts/pi-bootdir.sh OUTDIR` puts a blank `MILKLOG.TXT` (256 KiB: a header line, then spaces) in OUTDIR with the other boot files
-   (`scripts/pi-logfile.sh OUTDIR [KIB]` makes just that file). Copy it onto the boot partition with the Finder or `cp`,
-   name in capitals. **A new copy is fine; do not leave the old one out**: the kernel never creates a file.
-2. Boot the board. The kernel finds the file when the SD card is up (stage 5) and writes what has been logged so far; after that
-   it saves new log text every second or so, after every LED stage, and in a crash (the crash dump included, with the same
-   numbers the LED cycle carries).
-3. **When it is safe to power off**: once the desktop is up and everything is saved, the ACT LED stops being solid and shows
-   the **log saved signal**: two short blinks, then about a second of dark, over and over. (Solid on = still writing, or no
-   log file. After a crash, wait for the crash cycle to start: the log is flushed before it begins; give it ten seconds.)
-   Even a power cut earlier only loses the last second or two of text: nothing else on the card is touched.
-4. Put the card in the Mac. **`scripts/pi-readlog.sh /Volumes/<card>/MILKLOG.TXT > boot.log`** prints the log without its
-   padding and says on stderr whether the end marker is there ("end marker present": everything before the last flush is in the
-   file; "NO end marker": the board lost power or crashed during a flush, the text may stop mid-line). Hand over `boot.log`.
-   (`MILKLOG 1 boot=XXXXXXXX` is the first line: a number picked per boot, so a file that still holds an older boot's tail
-   further down cannot be confused with this one. The file is overwritten from the start on every boot.)
+### What to do, step by step (once, then after every run)
 
-**What it will and will not touch.** The kernel reads the partition table (the first FAT32 partition, type 0x0b or 0x0c), the FAT32 boot
-sector, the root directory (8.3 names, case-insensitive, long-name entries skipped) and the file's cluster chain through the FAT
-(fragmentation is fine, up to 128 pieces), and then **overwrites the data sectors of that one existing file, in place**. It never
-creates a file, never changes a FAT or a directory entry (not even the file's modification time or size), never touches another
-partition. It refuses, and writes nothing, if: there is no MBR / FAT32 partition, no `MILKLOG.TXT` in the root, the file is under 4 KiB or over 4 MiB, the
-chain leaves the volume, runs through a free, bad or reserved cluster, visits a cluster twice, has more or fewer clusters than the size
-needs, or the volume's numbers do not add up; each time one `milklog:` line says which. Every sector is checked against the file's chain
-immediately before it is written (`rpikit::fat::LogFile::contains`), and the host tests feed the parser garbage, loops and out-of-range
-clusters and check it never panics and never yields a sector outside the chain. The card in a milkfs-only setup (no FAT) is left alone: one log line.
+1. **Make the file, once.** `scripts/pi-bootdir.sh /tmp/milkos-boot` puts a blank `MILKLOG.TXT` (8 MiB) next to the kernel and the config
+   files; `scripts/pi-logfile.sh OUTDIR [SIZE]` makes just that file (`8M` is the default; `64K` to `32M`). It is one line of text and then spaces.
+2. **Copy it onto the card's boot partition** (the one with `config.txt`) with the Finder or `cp`, name in capitals, an ordinary copy.
+   Do not leave the old one out and **do not copy a new blank file over it unless you want to start the log again**: the file *is*
+   the log, and it keeps all the boots until it is full. The kernel never creates a file.
+3. **Boot the board**, use it, let it crash, whatever you were doing. Nothing to type.
+4. **Is it safe to pull the power?** Look at the green ACT LED once the boot is over (see the table below). *Two short blinks and then dark, over
+   and over* = everything is on the card and the last write worked: pull the power. Solid on = still writing (wait a few seconds), or there is no log file
+   on the card. A slow even blink (1 s on, 1 s off) = the card log gave up after write errors (the system is fine; the log
+   stops there). After a crash the log is written before the crash cycle starts; give it ten seconds. Even if you pull the power
+   at the wrong moment you lose only the last second or so of text, never the older boots. From the desktop's menu, Shut Down and Restart write the
+   log and say so in it.
+5. **Put the card in the Mac.** It shows up as a disk (the boot partition, often named `bootfs`). Then:
 
-**Not the block device.** The log writer has its own narrow path on the SD controller (`sdhci::raw_read` / `raw_write`): programmed I/O, polling, no allocator, no scheduler,
-no VFS, usable with interrupts off from the panic and exception handlers. It is not subject to `milk.sdwrite=1`: that option protects
-`/dev/mmcblk0` from *ordinary* writes (so booting the card cannot damage Raspberry Pi OS's root partition); the log writer is a
-separate path that only `rpi/logfile.rs` calls, only for sectors it has just proved are in the log file's clusters, and it is used even when
-the block device is read-only or never came up. In a crash it takes the controller (waiting 0.3 s for a transfer in progress), puts card and controller
-in order (status read; stop-transmission only if the card is mid-transfer) and flushes; a flush in progress on another CPU gets half a second
-before its state is taken over and the file is written again from the ring. It runs from the boot CPU's low-priority `milklog` thread, from
-the milestones, and from the crash path.
+   ```
+   scripts/pi-readlog.sh /Volumes/bootfs/MILKLOG.TXT --list         # one line per boot: when, how long, build, how it ended
+   scripts/pi-readlog.sh /Volumes/bootfs/MILKLOG.TXT --last > last-boot.log
+   ```
 
-**Layout** (`rpikit::logimg`): `MILKLOG 1 boot=...`, then a header (version, build hash), a `--------` rule, then the log text from the first line
-(`kernel/src/klog.rs`: a 32 KiB ring; if more than that is logged between two flushes the file says how many bytes were lost), then
-one marker line `<<milklog end boot=... flush=N bytes=M>>`, then spaces. The marker is always the last thing written; a flush
-rewrites only the sector the text ended in and the new ones. A file that fills up keeps its marker (`full`) and drops further text.
+6. **What to send the lead**: *the whole file* is best: copy `MILKLOG.TXT` off the card (zip it; 8 MiB shrinks to a few hundred KiB),
+   and say which boot was the bad one (the number from `--list`: the newest is last). If you want to send text instead, `--boot N > boot-N.log`
+   for the bad boot and for the one before it. Do not edit the file.
+7. **To start over**, copy a fresh blank `MILKLOG.TXT` onto the card (the old log is gone then).
+
+`scripts/pi-readlog.sh PATH [--all | --last | --boot N | --list] [--tail N]`: the log goes to stdout, notes to stderr. `--all` (the default) prints every boot in
+order, `--last` the newest, `--boot N` boot number N, `--list` a table with each boot's position in the log, line count, first and last uptime stamp,
+build, and **how it ended**: `shutdown` / `restart` (a clean one through the power manager), `crash` (a panic or exception, with the crash code), or *no end line* (a
+power cut, a reset, or still running when the card was taken out). `--tail N` keeps the last N lines of what would be printed. It warns when the ring has wrapped (the
+oldest text was overwritten) and when sectors are damaged. Exit status 0: whole; 1: read, with a warning; 2: not a milkOS log.
+The first version's 256 KiB files (format 1: one boot, an end marker) are still read, and the new kernel leaves such a file alone (it says so in the
+boot log): copy that log off, then use a fresh blank file.
+
+### On the board: `logsync`
+
+`logsync` (a command in `/Commands`, the shell finds it) saves the log to the card **now**, the shell's own prompt line included, and prints where the log stands:
+
+```
+milklog: writing to the log file on the card
+milklog: file 8388608 bytes, format 2: ring of 16382 sectors x 500 bytes
+milklog: boot 7 (this one); cursor 1234567 bytes of text ever written (lap 0); 0 bytes logged but not yet on the card
+milklog: 345 flushes, 6789 sectors written, 12 header writes; write errors 0 (retried), read errors 0; failed flushes in a row 0
+milklog: last good flush at uptime 301204 ms (now 301380 ms); everything is saved (LED: log saved signal)
+milklog: 4021 lines taken, 0 dropped by the rate cap (25 lines/s, 4096 bytes/s on average), 0 dropped because the buffer was full, 0 lost to lock contention; 3 system reports
+logsync: saved
+```
+
+Exit status 0 saved, 1 not saved (no usable log file, or the card refused), 2 this machine has no SD card log. It reads and writes `/dev/milklog` (write `sync`, read the status);
+at most one `sync` every two seconds does anything.
+
+### What is in the log
+
+Every line has an **uptime stamp** `[  123.456] ` (seconds since the board's power-on) and, for the sources below the first, a **tag**:
+
+| source | looks like |
+|---|---|
+| everything printed to the console, the serial port and the screens: `kprintln!`, drivers' diagnostics (`[sdhci]`, `[pcie]`, `[usb]`, `[genet]`, `[rng]`, `spi:`, `lcd:`), `led: stage N name`, the display and probe lines, the services' and programs' output on the console, the Browser's `[browser]` lines, panics, exception dumps and the LED crash code (`led: crash code ...`) | `[   12.345] led: stage 5 sdcard` |
+| the Terminal windows and pseudo-terminals: the shell and what runs in it (escape sequences removed) | `[   20.100] [tty1] msh:~$ ls` |
+| the journal's lines from user space (the services' stdout and stderr, which milkd forwards) | `[    8.129] [journal alarmd/9] started as milk (pid 9)` |
+| the audit log (without its hash chain) | `[    8.130] [audit] 9 pid 9 /System/Services/milkd cred setgroups...` |
+| the **system report**, once when the boot has finished and every 5 minutes after | `[   10.936] [report] -- /proc/meminfo` |
+| the log writer itself | `[   30.000] [milklog] the ring is full: from here...` |
+
+What you type in a Terminal window is in the log because the terminal echoes it; a password typed with the echo off is not. Share the file the way you would share a screenshot of the Terminal.
+
+A boot starts with a **banner**: `=== milkOS boot 7 === milkOS 0.2.0-dev (abc1234) | build abc1234 | git abc1234 | log format 2, file 8388608 bytes | uptime 4952 ms when the log was opened (counter ... at 62500000 Hz)`,
+then `previous boot 6: crash` (or `shutdown`, `restart`, or `no end recorded (power cut, reset or still running)`). A clean shutdown or restart ends with `=== milkOS boot 7 ended: shutdown ===`, a crash with
+`=== milkOS boot 7 ended: crash ===` after the crash dump. The text before the card is up (the first seconds of the boot) is collected in RAM and written as soon as the card and
+the file are found (LED stage 5), so the log starts at the first line.
+
+**The system report** (6 to 12 KiB each time; `[report]` lines): uptime and load; memory and memory pressure; CPU times and load; the scheduler; every thread with its CPU time; every process; the interrupt counts
+per CPU; the mounts and disk counters; `/dev`; the network interfaces with their counters, the routes and neighbours, the hostname; the hardware found at boot (PCI, USB, Ethernet, SD card, board and CPU
+facts); the SD controller's counters for the log writer; the SoC temperature, the firmware's throttling and under-voltage flags and the clocks (asked from the mailbox: a board whose mailbox does not
+answer says so); and where the log stands.
+
+### Caps and costs
+
+* **Rate cap.** At most **25 lines and 4 KiB per second on average**, with room for a burst of 3000 lines / 256 KiB (a whole boot is about 350 lines, 27 KB). Lines over it are dropped and counted; the next line that gets
+  through is preceded by `[milklog: N lines dropped by the rate cap (25 lines/s, 4096 bytes/s on average)]`. A crash lifts the cap. Terminal and pseudo-terminal output is looked at 8 KiB per write, lines are cut at 1000 bytes.
+  A runaway loop therefore costs the card at most about 4 KiB/s (14 MB an hour) and the ring (8 MiB) lasts more than half an hour of it; an idle board writes a few hundred bytes a minute plus the report.
+* **RAM.** 288 KiB for text waiting for the card (more than the largest burst the cap lets in; if it is full anyway because the card is slow, new lines are dropped and counted, so the start of the boot survives), 8 KiB of staging, 16 KiB of scratch for finding the end of the text, 6 KiB of hardware facts.
+  The intake takes a spin lock for the few microseconds a line needs, never allocates and never prints, so interrupt handlers and the crash path can log; a writer that cannot get the lock within a few thousand spins drops its text (counted).
+* **CPU.** The `milklog` thread has the lowest priority and wakes every 250 ms (once a second while showing the saved signal); with nothing new it does nothing. Writing needs the card for a few milliseconds a second at most.
+* **SD wear.** A flush rewrites only the sector the text ended in plus the new ones: with a line a second that is about one sector a second. The header (two copies, written alternately) is rewritten
+  at the start of a boot, every 64 KiB of text (a quarter of a small ring), when a boot ends and at most once a minute while there is new text. The ring spreads the writes over the whole file; 8 MiB at 1 KiB/s takes more than two hours to go round once.
+* **Flush policy.** At least once a second when there is new text (sooner when 4 KiB are waiting), after each LED stage, on `shutdown`/`restart` through the power manager, on `logsync`, and in the crash path.
+
+### The file (format 2, `rpikit::milklog`)
+
+```
+file sector 0, 1     header, two copies (written alternately; the one with the later sequence number and a good CRC wins)
+file sector 2 ...    the ring: each sector = 500 bytes of text + a 12-byte trailer (absolute sector number, bytes used, boot number, CRC-32)
+```
+
+Text byte `p` of the whole log (all boots, counted from the first) lives in absolute sector `p / 500`, ring slot `(p / 500) % R`. The header is only a **hint and an index**:
+magic `MILKLOG2`, version, sequence number, the geometry, the boot counter, the write cursor when it was written, and the last 28 boots (number, how it ended, start position), all under a CRC.
+The kernel never trusts it blindly: at boot it starts at the header's cursor and **follows the sectors forward** (each says by itself which lap and boot it belongs to and whether it was written whole) to where the text really ends; if the header
+is torn, from a different file size or lying, it scans the whole ring for the newest sector. A sector left over from the previous lap has the wrong number, a half-written one the wrong CRC, and a "ghost" behind a gap (a torn write
+that landed out of order) has a boot number that goes backwards: none of them is taken for text. When the ring is full the oldest sectors are overwritten, a `[milklog]` line says where the ring went round, and the reader warns that older text is gone.
+A blank file (spaces, from `pi-logfile.sh`) is upgraded in place the first time. The same procedure is in `scripts/pi_readlog.py` for the Mac.
+
+### What it will and will not touch
+
+The kernel reads the partition table (the first FAT32 partition, type 0x0b or 0x0c), the FAT32 boot sector, the root directory (8.3 names, case-insensitive, long-name entries skipped) and the file's cluster chain through the FAT
+(fragmentation is fine, up to 128 pieces), and then **overwrites sectors of that one existing file, in place**. It never creates a file, never changes a FAT or a directory entry (not even the file's modification time or size), never
+touches another partition. It refuses, and writes nothing, if: there is no MBR / FAT32 partition, no `MILKLOG.TXT` in the root, the file is under 4 KiB or over 32 MiB, the chain leaves the volume, runs through a free, bad or reserved cluster,
+visits a cluster twice, has more or fewer clusters than the size needs, the volume's numbers do not add up, or the file holds an old format 1 log or something that is not a milkOS log or a blank file; each time one `milklog:` line says which. Every
+sector is checked against the file's chain immediately before it is written (`rpikit::fat::LogFile::contains`). The host tests feed the parser and the recovery garbage, loops, out-of-range clusters, torn and lying headers and damaged sectors and check
+that nothing panics and nothing is read or written outside the file.
+
+**Not the block device.** The log writer has its own narrow path on the SD controller (`sdhci::raw_read` / `raw_write`): programmed I/O, polling, no allocator, no scheduler, no VFS, usable with interrupts off from the panic and exception handlers. It is not subject
+to `milk.sdwrite=1`: that option protects `/dev/mmcblk0` from *ordinary* writes (so booting the card cannot damage Raspberry Pi OS's root partition); the log writer is a separate path that only `rpi/logfile.rs` calls, only for sectors it has just proved are
+in the log file's clusters, and it is used even when the block device is read-only or never came up. In a crash it takes the controller (waiting 0.3 s for a transfer in progress), puts card and controller in order and flushes; a flush in progress on another CPU
+gets half a second before its state is taken over. It runs from the boot CPU's low-priority `milklog` thread, from the milestones, from shutdown and `logsync`, and from the crash path.
+
+**Errors.** A failed read or write is retried a few times (3 ms apart) at once; a flush that still fails is tried again a second later; three failed flushes in a row stop the card log for the rest of the boot: one line on the screens and
+the serial port says so, the system keeps running, and the LED shows the slow even blink (1 s on, 1 s off) once the boot is over. A card with no log file, or a file we do not trust, keeps the log off and the LED solid on: one `milklog:` line in the boot log says why.
+
+### What the LED says about the log (once the boot is over)
+
+| LED | means |
+|---|---|
+| **solid on** | running; the log is still being written (or there is no log file on the card) |
+| **two short blinks, then dark, once a second** | everything logged is on the card, nothing new for two seconds, **and the last write worked**: safe to pull the power |
+| **slow even blink**, 1 s on, 1 s off | the card log stopped after repeated write errors; the system runs on, the log does not |
+| fast flashing, then counted pulses | a crash ("After a crash") |
 
 **What the log carries for a board you cannot see into**: `boot:` (build, the exception level the firmware entered at and the one the kernel runs at),
 `cpu:` (MIDR, MPIDR, the ID_AA64 feature registers, cache lines, counter frequency, SCTLR/TCR/MAIR), `dtb:` (model, compatible strings, memory
@@ -403,6 +495,8 @@ not milkOS's.
 | 6 pulses | stage 6, **scheduler**: the scheduler runs and the other three CPUs are started |
 | 7 pulses | stage 7, **userspace**: the first user process (`init`) was started |
 | **solid on** | the desktop is up (or there is no framebuffer and so no desktop to wait for): **running fine** |
+| then **two short blinks and dark, once a second** | running fine, and everything is saved in the log file on the card, the last write having worked ("Reading the log") |
+| then a **slow even blink**, 1 s on, 1 s off | running, but the card log gave up after repeated write errors |
 | **fast flashing** (10 flashes, 2 s), then dark, then groups of counted pulses, over and over | **crashed** (a panic or an exception), at any point; the groups say where: see "After a crash" below |
 
 A good boot is: marker, 1, 2, 3, 4, 5, 6, 7 pulses (about 9 s in all), then solid on. The kernel prints
@@ -701,7 +795,7 @@ inside the RAM we manage and its frames are reserved.
 EMMC2 needs that: 8 and 16 bit registers go through read-modify-write of the aligned word, the write-1-to-clear
 interrupt status through whole-word writes). Programmed I/O, polled, every wait bounded: reset, 3.3 V, 400 kHz
 identification (the divider from the clock the firmware reports), CMD0/CMD8/ACMD41/CMD2/CMD3/CMD9 (capacity from the CSD,
-version 1 and 2)/CMD7/ACMD6 (4 bit), 25 MHz, `CMD17/18/24/25` with auto CMD12. Registers as `/dev/mmcblk0`; besides the block device there is the boot log writer's narrow path (`raw_read` / `raw_write`, "The boot log in a file"). The card
+version 1 and 2)/CMD7/ACMD6 (4 bit), 25 MHz, `CMD17/18/24/25` with auto CMD12. Registers as `/dev/mmcblk0`; besides the block device there is the log writer's narrow path (`raw_read` / `raw_write`, "Reading the log"). The card
 detect bit is not trusted on EMMC2 (the Pi does not wire it). Not yet: DMA (SDMA/ADMA2: the buffers are already below the DMA
 limit), high speed mode (50 MHz), UHS, CMD23, voltage switching, SDIO. `scripts/pi-qemu-test.sh` formats an image with milkfs,
 mounts it from the emulated card, writes a file, takes a snapshot, reboots and finds the file.

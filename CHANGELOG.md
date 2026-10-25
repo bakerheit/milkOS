@@ -26,13 +26,22 @@
 - Ethernet: the boot log says `eth0: genet` (it said `virtio slot 0`); the poll thread logs a status line every 10 s (link, PHY status register, frames sent and received,
   drops, ring indexes, interrupts) so a log shows whether the controller works at all; frames are no longer queued while the link is down; the DMA buffers' bus
   addresses are logged and checked against the DMA limit. The device tree dump in the log is no longer cut off at 150 lines and now includes `dma-ranges`.
-- The kernel saves its boot log into a file on the SD card, for a board with no serial cable and no working screen: put the blank `MILKLOG.TXT`
-  (`scripts/pi-bootdir.sh` or `scripts/pi-logfile.sh` makes it) on the FAT boot partition, boot, wait for the ACT LED's "log saved" signal (two blinks and a
-  pause), read it on the Mac with `scripts/pi-readlog.sh`. The kernel never creates a file or changes the FAT or a directory: it overwrites the data sectors of
-  that existing file in place, through a narrow SD path of its own (no allocator, usable from the crash handlers, independent of `milk.sdwrite=1`), after
-  proving every sector belongs to the file's cluster chain. FAT32 parsing and the file layout are in `rpikit` (`fat`, `logimg`) with host tests (long-name entries,
-  fragmentation, loops, out-of-range and truncated chains, garbage); the new `pi-log-test` boots generated cards (fragmented file, a crash flush, eight hostile cards
-  left byte for byte untouched) and checks every other sector of the image is unchanged.
+- The kernel logs **everything** to the SD card, for the whole session and across boots, for a board with no serial cable and no working screen: put the blank
+  `MILKLOG.TXT` (8 MiB; `scripts/pi-bootdir.sh` or `scripts/pi-logfile.sh [SIZE]` makes it) on the FAT boot partition once, use the board, pop the card into the Mac and
+  read it with `scripts/pi-readlog.sh PATH [--all | --last | --boot N | --list] [--tail N]` (`--list` says for every boot whether it ended in a clean shutdown or restart, a crash, or a power cut).
+  The file is a ring of sectors (500 bytes of text + a trailer with the sector's number, boot and CRC) behind two alternating header copies; every boot appends a banner
+  (version, build, git hash) and its text after the previous boot's, until the ring wraps and the oldest text is overwritten (a marker line says so). The kernel finds the end of the earlier text
+  from the header's cursor by following the sectors, and never trusts the header: a torn or lying header falls back to a scan of the whole ring. What is logged: the console (every `kprintln!`,
+  the drivers' diagnostics, the LED stage lines, the display and probe lines, programs writing to the console, the Browser's `[browser]` lines, panics, exception dumps and the LED crash code), the Terminal
+  windows and pseudo-terminals, the journal lines of the services, the audit log, each with an uptime stamp, and a **system report** (memory, CPU and thread load, processes, interrupts, mounts and disks, network
+  counters, the hardware found at boot, the SD controller's counters, SoC temperature, throttling flags and clocks from the mailbox) when the boot has finished and every five minutes. Costs: at most 25 lines and 4 KiB a
+  second on average (a burst of 3000 lines is allowed; dropped lines are counted in the log), 288 KiB of RAM for text waiting for the card, a flush at least once a second when there is something new, at each LED stage,
+  on shutdown and restart through the power manager, on the new `logsync` command (it also prints where the log stands, via `/dev/milklog`) and in the crash path. Three failed flushes in a row stop the card log (the system
+  keeps running; the LED blinks slowly, 1 s on and 1 s off); the "log saved" LED signal now also means the latest flush succeeded. The kernel never creates a file or changes the FAT or a directory: it overwrites sectors
+  of that existing file in place, through a narrow SD path of its own (no allocator, usable from the crash handlers, independent of `milk.sdwrite=1`), after proving every sector belongs to the file's cluster chain; a file
+  that holds an older format 1 log or anything else is left alone. FAT32 parsing, the ring layout, recovery after power cuts, line assembly and the rate cap are in `rpikit` (`fat`, `milklog`, `logintake`) with host tests
+  (torn flushes in any order, ghost sectors, lying headers, damaged sectors, fuzzing); `pi-readlog-test` tests the Mac-side reader, `pi-log-multiboot-test` boots a generated card three times in a row (a power cut, a crash,
+  a clean shutdown) and then a 64 KiB file until the ring wraps, and `pi-log-test` boots a fragmented file and ten hostile cards left byte for byte untouched; all of them check every other sector of the image is unchanged.
 - The boot log now carries what is needed to debug a board remotely: the build, exception level, CPU feature registers, device tree facts, SDHCI/PCIe/USB/GENET/RNG/SPI
   register values at failures, and every step of the mailbox probe. The mailbox now separates "transport works" (stage 2, decided by a harmless message before any
   framebuffer is asked for) from "framebuffer allocated" (stage 3), accepts a reply that names our buffer under any bus alias, tries the other aliases if the first is

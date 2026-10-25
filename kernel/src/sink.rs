@@ -211,6 +211,9 @@ impl Write for Sink {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         let _ = crate::Uart.write_str(s);
         crate::klog::write(s);
+        // The SD card log (rpi/logbuf.rs) gets everything the serial port and the screens get.
+        #[cfg(feature = "raspi")]
+        crate::rpi::logbuf::console(s);
         with_screen(|c| c.write_str(s));
         #[cfg(feature = "raspi")]
         with_lcd(|c| c.write_str(s));

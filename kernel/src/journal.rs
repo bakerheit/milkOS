@@ -161,6 +161,9 @@ pub fn add(unit: &str, level: Level, pid: u32, uid: u32, msg: &str) {
     let mut e = EMPTY;
     e.unit_len = clip(&mut e.unit, unit.as_bytes());
     e.msg_len = clip(&mut e.msg, msg.trim_end().as_bytes());
+    // The SD card log (rpi/logbuf.rs) gets what user space says (the kernel's own lines reach it through the console).
+    #[cfg(feature = "raspi")]
+    tee_to_card_log(&e, pid);
     e.level = level;
     e.pid = pid;
     e.uid = uid;
@@ -173,6 +176,36 @@ pub fn add(unit: &str, level: Level, pid: u32, uid: u32, msg: &str) {
     let slot = (e.seq as usize) % SLOTS;
     r.slots[slot] = e;
     r.next += 1;
+}
+
+/// `[journal unit/pid level] message` into the SD card log, for every unit but the kernel.
+#[cfg(feature = "raspi")]
+fn tee_to_card_log(e: &Entry, pid: u32) {
+    let unit = &e.unit[..e.unit_len as usize];
+    if unit == b"kernel" || e.msg_len == 0 {
+        return;
+    }
+    struct W<'a>(&'a mut [u8], usize);
+    impl Write for W<'_> {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            let n = s.len().min(self.0.len() - self.1);
+            self.0[self.1..self.1 + n].copy_from_slice(&s.as_bytes()[..n]);
+            self.1 += n;
+            Ok(())
+        }
+    }
+    let mut tag = [0u8; 80];
+    let mut w = W(&mut tag, 0);
+    let _ = write!(
+        w,
+        "[journal {}/{pid}]",
+        core::str::from_utf8(unit).unwrap_or("?")
+    );
+    let n = w.1;
+    crate::rpi::logbuf::tagged(
+        core::str::from_utf8(&tag[..n]).unwrap_or("[journal]"),
+        core::str::from_utf8(&e.msg[..e.msg_len as usize]).unwrap_or("?"),
+    );
 }
 
 // ---- kprintln -> journal ------------------------------------------------------------------

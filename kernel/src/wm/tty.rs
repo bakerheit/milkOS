@@ -94,6 +94,9 @@ pub fn path(n: usize) -> alloc::string::String {
 
 fn push_out(n: usize, b: &[u8]) {
     let i = idx(n);
+    // The SD card log (rpi/logbuf.rs) gets what the shell and its programs print in this tab.
+    #[cfg(feature = "raspi")]
+    crate::rpi::logbuf::tty(i + 1, b);
     {
         let mut out = OUT[i].lock();
         if out.len() + b.len() > OUT_MAX {

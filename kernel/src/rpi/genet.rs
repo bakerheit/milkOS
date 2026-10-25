@@ -125,27 +125,62 @@ static TX_RING_FULL: AtomicU64 = AtomicU64::new(0);
 static RX_IRQS: AtomicU32 = AtomicU32::new(0);
 /// The PHY's MDIO address (0xff: none found).
 static PHY_ADDR: AtomicU8 = AtomicU8::new(0xff);
+/// Receive interrupts that came with nothing to do, and every interrupt taken (the status bits of the last one).
+static IRQS_ALL: AtomicU32 = AtomicU32::new(0);
+static IRQ_LAST_STATUS: AtomicU32 = AtomicU32::new(0);
+/// Frames the stack wanted to send with `milk.genet=notx`.
+static TX_DISABLED: AtomicU64 = AtomicU64::new(0);
+/// The link-up path stopped on an SError: it is not tried again this boot.
+static LINK_BROKEN: AtomicBool = AtomicBool::new(false);
+/// With `milk.genet=nolink`: the PHY has a link (nothing else is done about it).
+static NOLINK_SEEN: AtomicBool = AtomicBool::new(false);
 
 use rpikit::genet::{self as gk, Negotiated, resolve};
 
-/// Program the MAC for the negotiated mode and tell the RGMII block the link is up.
-fn mac_link(n: Negotiated) {
-    let speed = match n.mbps {
-        1000 => 2,
-        100 => 1,
-        _ => 0,
-    };
-    let mut cmd = rd(UMAC_CMD);
-    cmd &= !(3 << CMD_SPEED_SHIFT | CMD_HD_EN);
-    cmd |= speed << CMD_SPEED_SHIFT | if n.full { 0 } else { CMD_HD_EN };
-    cmd |= CMD_TX_EN | CMD_RX_EN;
-    wr(UMAC_CMD, cmd);
-    wr(
-        EXT_RGMII_OOB_CTRL,
-        (rd(EXT_RGMII_OOB_CTRL) & !OOB_DISABLE) | RGMII_LINK | RGMII_MODE_EN,
-    );
+/// The `milk.genet=` options, as bits (read from the poll thread, the stack's send path and the interrupt handler).
+static OPT_BITS: AtomicU8 = AtomicU8::new(0);
+const OPT_PROBE: u8 = 1;
+const OPT_NOLINK: u8 = 2;
+const OPT_NORX: u8 = 4;
+const OPT_NOTX: u8 = 8;
+const OPT_POLLED: u8 = 16;
+
+fn set_opts(o: gk::Options) {
+    let bits = [(o.probe, OPT_PROBE), (o.nolink, OPT_NOLINK), (o.norx, OPT_NORX), (o.notx, OPT_NOTX), (o.polled, OPT_POLLED)]
+        .iter()
+        .fold(0, |a, &(on, b)| if on { a | b } else { a });
+    OPT_BITS.store(bits, Ordering::Relaxed);
 }
 
+fn opts() -> gk::Options {
+    let b = OPT_BITS.load(Ordering::Relaxed);
+    gk::Options { probe: b & OPT_PROBE != 0, nolink: b & OPT_NOLINK != 0, norx: b & OPT_NORX != 0, notx: b & OPT_NOTX != 0, polled: b & OPT_POLLED != 0 }
+}
+
+fn probing() -> bool {
+    OPT_BITS.load(Ordering::Relaxed) & OPT_PROBE != 0
+}
+
+/// `milk.genet=probe`: save the log to the card now, from a thread (never from the interrupt handler or under the
+/// network stack's lock: the card write waits for other work). The next line the file would have had is then on the card
+/// whatever happens to the board after this call.
+fn save_log() {
+    if probing() {
+        let _ = super::logfile::sync_now();
+    }
+}
+
+/// `milk.genet=probe`: the first frame has been announced (receive) / the first doorbell rung (transmit).
+static RX_ANNOUNCED: AtomicBool = AtomicBool::new(false);
+static TX_ANNOUNCED: AtomicBool = AtomicBool::new(false);
+/// `milk.genet=probe`: the transmit producer index the stack wants (`1 << 16 | index`; 0: nothing yet) and the value the
+/// Ethernet thread last wrote to the doorbell. Only that thread rings the doorbell then, so the log can be saved first.
+static TX_WANTED: AtomicU32 = AtomicU32::new(0);
+static TX_RUNG: AtomicU32 = AtomicU32::new(0);
+/// `milk.genet=probe`: the first interrupt has been named in the log.
+static IRQ_ANNOUNCED: AtomicBool = AtomicBool::new(false);
+
+/// Link lost: the transmitter and receiver off, the RGMII block told.
 fn mac_link_down() {
     wr(EXT_RGMII_OOB_CTRL, rd(EXT_RGMII_OOB_CTRL) & !RGMII_LINK);
     wr(UMAC_CMD, rd(UMAC_CMD) & !(CMD_TX_EN | CMD_RX_EN));
@@ -181,6 +216,102 @@ fn phy_start(phy: u8) {
     mdio_write(phy, MII_BMCR, BMCR_ANENABLE | BMCR_ANRESTART);
 }
 
+/// The PHY's registers that decide the mode, and what both ends agreed on.
+struct Resolved {
+    mode: Option<Negotiated>,
+    adv: u16,
+    lpa: u16,
+    c1000: u16,
+    s1000: u16,
+}
+
+fn resolve_phy(phy: u8) -> Resolved {
+    let adv = mdio_read(phy, MII_ADVERTISE).unwrap_or(0);
+    let lpa = mdio_read(phy, MII_LPA).unwrap_or(0);
+    let c1000 = mdio_read(phy, MII_CTRL1000).unwrap_or(0);
+    let s1000 = mdio_read(phy, MII_STAT1000).unwrap_or(0);
+    Resolved { mode: resolve(adv, lpa, c1000, s1000), adv, lpa, c1000, s1000 }
+}
+
+fn link_line(r: &Resolved, n: Negotiated, what: &str) {
+    kprintln!(
+        "[genet] {what}: {} Mb/s {} duplex (adv {:#06x} lpa {:#06x} ctrl1000 {:#06x} stat1000 {:#06x})",
+        n.mbps,
+        if n.full { "full" } else { "half" },
+        r.adv,
+        r.lpa,
+        r.c1000,
+        r.s1000
+    );
+}
+
+/// The link-up path (`rpikit::genet::init::LINK_UP`): the MAC is programmed for the negotiated mode and goes live. In
+/// `milk.genet=probe` each step is named in the log, and the log saved to the card, *before* it runs: if the board stops
+/// dead, the last `[genet] link: step N name` line in the file is the step that was running.
+fn link_up(phy: u8) {
+    let o = opts();
+    let total = o.count(gk::init::LINK_UP) + o.count(gk::init::FIRST_FRAMES);
+    let mut n = 0;
+    let mut res: Option<Resolved> = None;
+    for st in gk::init::LINK_UP {
+        if !o.runs(st.gate) {
+            continue;
+        }
+        n += 1;
+        if o.probe {
+            kprintln!("[genet] link: step {n}/{total} {} ({st})", st.name);
+            save_log();
+        }
+        match st.op {
+            gk::Op::LinkResolve => {
+                let r = resolve_phy(phy);
+                if r.mode.is_none() {
+                    kprintln!("[genet] the PHY says link up but no common mode (lpa {:#06x}): the MAC is left alone", r.lpa);
+                    return;
+                }
+                res = Some(r);
+            }
+            gk::Op::MacSpeed => {
+                if let Some(m) = res.as_ref().and_then(|r| r.mode) {
+                    wr(st.reg, gk::umac_cmd_for(rd(st.reg), m));
+                }
+            }
+            gk::Op::Set(b) => wr(st.reg, rd(st.reg) | b),
+            gk::Op::Write(v) => wr(st.reg, v),
+            gk::Op::Event(_) => {
+                LINK_UP.store(true, Ordering::Release);
+                if let Some(r) = res.as_ref()
+                    && let Some(m) = r.mode
+                {
+                    link_line(r, m, "link up");
+                }
+            }
+            _ => {}
+        }
+        // An SError taken because of a step ends the path: probe mode checks after every step, otherwise at the end.
+        let label = if o.probe { Some(st.name) } else { st.group_end };
+        if let Some(label) = label
+            && !super::serror_checkpoint_catch(label)
+        {
+            kprintln!(
+                "[genet] link: an SError was taken at checkpoint '{label}' (step {n}/{total} {}: {st}): the MAC is switched off again and the link is not tried again this boot",
+                st.name
+            );
+            LINK_UP.store(false, Ordering::Release);
+            LINK_BROKEN.store(true, Ordering::Release);
+            mac_link_down();
+            return;
+        }
+    }
+    if o.probe {
+        kprintln!(
+            "[genet] link: {n} steps done; the first received and the first transmitted frame are named next (umac cmd {:#x})",
+            rd(UMAC_CMD)
+        );
+        save_log();
+    }
+}
+
 /// Look at the PHY and bring the MAC to match; returns whether the link is up.
 fn poll_link() -> bool {
     let phy = PHY_ADDR.load(Ordering::Relaxed);
@@ -193,24 +324,29 @@ fn poll_link() -> bool {
         return false;
     };
     let up = bmsr & BMSR_LSTATUS != 0 && bmsr & BMSR_ANEGCOMPLETE != 0;
+    if opts().nolink {
+        // The controller is up and the PHY runs; the MAC is never programmed, the stack never sees the link.
+        let seen = NOLINK_SEEN.load(Ordering::Relaxed);
+        if up && !seen {
+            NOLINK_SEEN.store(true, Ordering::Relaxed);
+            let r = resolve_phy(phy);
+            match r.mode {
+                Some(m) => link_line(&r, m, "the PHY has a link (milk.genet=nolink: the MAC is not programmed, no network)"),
+                None => kprintln!("[genet] the PHY says link up but no common mode (lpa {:#06x}); milk.genet=nolink: nothing is programmed", r.lpa),
+            }
+            save_log();
+        } else if !up && seen {
+            NOLINK_SEEN.store(false, Ordering::Relaxed);
+            kprintln!("[genet] the PHY lost the link (milk.genet=nolink)");
+        }
+        return up;
+    }
     let was = LINK_UP.load(Ordering::Relaxed);
     if up && !was {
-        let adv = mdio_read(phy, MII_ADVERTISE).unwrap_or(0);
-        let lpa = mdio_read(phy, MII_LPA).unwrap_or(0);
-        let c1000 = mdio_read(phy, MII_CTRL1000).unwrap_or(0);
-        let s1000 = mdio_read(phy, MII_STAT1000).unwrap_or(0);
-        match resolve(adv, lpa, c1000, s1000) {
-            Some(n) => {
-                mac_link(n);
-                LINK_UP.store(true, Ordering::Release);
-                kprintln!(
-                    "[genet] link up: {} Mb/s {} duplex (adv {adv:#06x} lpa {lpa:#06x} ctrl1000 {c1000:#06x} stat1000 {s1000:#06x})",
-                    n.mbps,
-                    if n.full { "full" } else { "half" }
-                );
-            }
-            None => kprintln!("[genet] the PHY says link up but no common mode (lpa {lpa:#06x})"),
+        if LINK_BROKEN.load(Ordering::Acquire) {
+            return false;
         }
+        link_up(phy);
     } else if !up && was {
         LINK_UP.store(false, Ordering::Release);
         mac_link_down();
@@ -257,6 +393,11 @@ impl Genet {
     }
 
     pub fn rx_pop(&mut self) -> Option<RxBuf> {
+        // `milk.genet=probe`: the first frame is named in the log (and the log saved) by the Ethernet thread before
+        // anything reads its descriptor or its buffer.
+        if probing() && !RX_ANNOUNCED.load(Ordering::Acquire) {
+            return None;
+        }
         loop {
             let prod = rd(ring_reg(RDMA, R_CONS_INDEX)) as u16;
             if prod == self.rx_cons {
@@ -313,6 +454,12 @@ impl Genet {
             TX_LINK_DOWN.fetch_add(1, Ordering::Relaxed);
             return false;
         }
+        // `milk.genet=notx`: the transmit DMA engine is off, nothing is handed to it.
+        if opts().notx {
+            self.stats.tx_dropped += 1;
+            TX_DISABLED.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
         let cons = rd(ring_reg(TDMA, R_CONS_INDEX)) as u16;
         if gk::in_flight(self.tx_prod, cons) >= RING_SIZE {
             self.stats.tx_dropped += 1;
@@ -340,7 +487,13 @@ impl Genet {
         self.tx_prod = self.tx_prod.wrapping_add(1);
         // SAFETY: barrier: the descriptor before the producer index that releases it.
         unsafe { core::arch::asm!("dsb sy", options(nostack, preserves_flags)) };
-        wr(ring_reg(TDMA, R_PROD_INDEX), self.tx_prod as u32);
+        if probing() {
+            // Not here (the network stack's lock is held, interrupts are off: the log cannot be saved from here): the
+            // Ethernet thread names the first doorbell in the log, saves it, and rings it (`ring_doorbell`).
+            TX_WANTED.store(1 << 16 | self.tx_prod as u32, Ordering::Release);
+        } else {
+            wr(ring_reg(TDMA, R_PROD_INDEX), self.tx_prod as u32);
+        }
         self.stats.tx_packets += 1;
         self.stats.tx_bytes += n as u64;
         TX_FRAMES.fetch_add(1, Ordering::Relaxed);
@@ -370,6 +523,7 @@ struct StepFailed;
 /// every group (after every step in `milk.genet=probe`). The first SError ends it, with a line that names the group.
 struct Bringup<'a> {
     probe: bool,
+    opts: gk::Options,
     mac: [u8; 6],
     rx: &'a Buffer,
     /// Steps run so far, over all tables, and how many there are (for the `step N/M` lines).
@@ -380,6 +534,19 @@ struct Bringup<'a> {
 impl Bringup<'_> {
     fn run(&mut self, steps: &[gk::Step]) -> Result<(), StepFailed> {
         for (i, st) in steps.iter().enumerate() {
+            if !self.opts.runs(st.gate) {
+                // Left out by a milk.genet option; the checkpoint it would have ended a group with still runs.
+                if self.probe {
+                    kprintln!("[genet] probe step {} skipped (milk.genet option): {}", st.name, st);
+                }
+                if let Some(label) = st.group_end
+                    && !super::serror_checkpoint_catch(label)
+                {
+                    self.report_failure(steps, i, label);
+                    return Err(StepFailed);
+                }
+                continue;
+            }
             self.done += 1;
             let n = self.done;
             if self.probe {
@@ -426,6 +593,8 @@ impl Bringup<'_> {
                 post_rx_descriptors(self.rx);
                 dma::sync(self.rx.va(), self.rx.len());
             }
+            // Link-up path and markers: not part of the bring-up tables.
+            gk::Op::LinkResolve | gk::Op::MacSpeed | gk::Op::Event(_) => {}
         }
         None
     }
@@ -460,6 +629,8 @@ impl Bringup<'_> {
 
 fn on_irq(_irq: u32, _frame: &mut crate::exceptions::TrapFrame) {
     let status = rd(INTRL2_STAT) & !rd(INTRL2_MASK_STATUS);
+    IRQ_LAST_STATUS.store(status, Ordering::Relaxed);
+    IRQS_ALL.fetch_add(1, Ordering::Relaxed);
     wr(INTRL2_CLEAR, status);
     if status & IRQ_RXDMA_DONE != 0 {
         RX_IRQS.fetch_add(1, Ordering::Relaxed);
@@ -530,21 +701,39 @@ pub fn init() {
     // Nothing before this point has touched anything but the version register: a pending SError from an earlier driver
     // is taken here, not blamed on the controller.
     super::serror_checkpoint("genet-buffers");
-    let mode = match gk::init::Mode::parse(crate::fwcfg::option("genet")) {
-        Ok(m) => m,
-        Err(m) => {
-            kprintln!("[genet] milk.genet must be probe (or absent), running normally");
-            m
-        }
-    };
-    let probe = mode == gk::init::Mode::Probe;
-    let total = gk::init::INIT.len() + gk::init::IRQ_MASK.len() + gk::init::IRQ_UNMASK.len() + gk::init::DMA_ON.len();
-    if probe {
+    let (o, unknown) = gk::Options::parse(crate::fwcfg::option("genet"));
+    if let Some(w) = unknown {
         kprintln!(
-            "[genet] milk.genet=probe: {total} steps, an SError checkpoint after each; the line `probe step N name ok` is printed once its access did not raise one"
+            "[genet] milk.genet: unknown word {:?} (known: probe, nolink, norx, notx, polled, separated by commas); the others are used",
+            core::str::from_utf8(w).unwrap_or("?")
         );
     }
-    let mut b = Bringup { probe, mac, rx: &rx_bufs, done: 0, total };
+    set_opts(o);
+    let probe = o.probe;
+    let total = gk::init::INIT.len() + gk::init::IRQ_MASK.len() + o.count(gk::init::DMA_ON);
+    if probe || o.degraded() {
+        let mut words = alloc::string::String::new();
+        let _ = o.write_words(&mut words);
+        kprintln!("[genet] milk.genet={words}");
+    }
+    if probe {
+        kprintln!(
+            "[genet] milk.genet=probe: {total} steps, an SError checkpoint after each; the line `probe step N name ok` is printed once its access did not raise one; the link-up path and the first frames are named in the log, and the log saved, before they happen (`link: step N name`)"
+        );
+    }
+    if o.nolink {
+        kprintln!("[genet] milk.genet=nolink: the controller comes up, the MAC is never programmed for a link, the network stack sees no link");
+    }
+    if o.norx {
+        kprintln!("[genet] milk.genet=norx: the receive DMA engine and the interrupt stay off (the MAC's receiver still goes on with the link)");
+    }
+    if o.notx {
+        kprintln!("[genet] milk.genet=notx: the transmit DMA engine stays off, nothing is ever sent");
+    }
+    if o.polled {
+        kprintln!("[genet] milk.genet=polled: the interrupt stays masked, the rings are polled every 10 ms by the Ethernet thread");
+    }
+    let mut b = Bringup { probe, opts: o, mac, rx: &rx_bufs, done: 0, total };
     // Power, reset, DMA off, MAC and ring set-up: the table's order (rpikit::genet::init::INIT).
     if b.run(gk::init::INIT).is_err() {
         return;
@@ -572,18 +761,20 @@ pub fn init() {
         kprintln!("[genet] an SError was taken at checkpoint 'genet-phy' (the PHY's MDIO accesses): skipping the Ethernet controller");
         return;
     }
-    // Interrupt on received frames; DMA on.
+    // All interrupt sources masked and cleared. The receive interrupt is unmasked by the link-up path
+    // (`link-irq-unmask`), not here: no frame can arrive before a link.
     if b.run(gk::init::IRQ_MASK).is_err() {
         return;
     }
-    if crate::gic::register(IRQ, on_irq).is_ok() {
-        let _ = crate::gic::enable(IRQ);
-        if b.run(gk::init::IRQ_UNMASK).is_err() {
-            return;
+    if o.runs(gk::Gate::Irq) {
+        if crate::gic::register(IRQ, on_irq).is_ok() {
+            let _ = crate::gic::enable(IRQ);
+        } else {
+            kprintln!("[genet] the GIC refused the interrupt: the rings are polled");
+            set_opts(gk::Options { polled: true, ..o });
         }
-    } else {
-        b.done += gk::init::IRQ_UNMASK.len();
     }
+    // The DMA engines on (the ones the options leave on).
     if b.run(gk::init::DMA_ON).is_err() {
         return;
     }
@@ -625,6 +816,9 @@ pub fn start() {
             if n % 10 == 0 {
                 super::serror_checkpoint("genet-poll");
             }
+            if probing() {
+                first_frames();
+            }
             // Safety net next to the interrupt: look at the rings every 10 ms.
             crate::net::on_device_irq();
             // Every 10 s: does the controller work at all? Link, frames, ring indexes. The first six
@@ -645,12 +839,67 @@ pub fn start() {
     });
 }
 
+/// `milk.genet=probe`, every 10 ms from the Ethernet thread: name the first received frame and the first transmit doorbell
+/// in the log, and save the log, *before* the CPU touches the frame or the controller is told about the first one to send.
+fn first_frames() {
+    let o = opts();
+    let total = o.count(gk::init::LINK_UP) + o.count(gk::init::FIRST_FRAMES);
+    let base = o.count(gk::init::LINK_UP);
+    if !IRQ_ANNOUNCED.load(Ordering::Relaxed) && IRQS_ALL.load(Ordering::Relaxed) != 0 {
+        IRQ_ANNOUNCED.store(true, Ordering::Relaxed);
+        kprintln!(
+            "[genet] link: the first interrupt was taken and returned (status {:#x}, {} so far)",
+            IRQ_LAST_STATUS.load(Ordering::Relaxed),
+            IRQS_ALL.load(Ordering::Relaxed)
+        );
+    }
+    if !LINK_UP.load(Ordering::Acquire) {
+        return;
+    }
+    if !RX_ANNOUNCED.load(Ordering::Relaxed) && o.runs(gk::Gate::RxDma) {
+        let landed = rd(ring_reg(RDMA, R_CONS_INDEX)) as u16;
+        if landed != 0 {
+            let st = &gk::init::FIRST_FRAMES[0];
+            kprintln!(
+                "[genet] link: step {}/{total} {} ({st}) (receive producer index {landed}, umac cmd {:#x}, rdma ctrl {:#x})",
+                base + 1,
+                st.name,
+                rd(UMAC_CMD),
+                rd(dma_reg(RDMA, D_CTRL))
+            );
+            save_log();
+            RX_ANNOUNCED.store(true, Ordering::Release);
+        }
+    }
+    let wanted = TX_WANTED.load(Ordering::Acquire);
+    if wanted != 0 && wanted != TX_RUNG.load(Ordering::Relaxed) {
+        if !TX_ANNOUNCED.load(Ordering::Relaxed) {
+            let st = &gk::init::FIRST_FRAMES[1];
+            let n = base + o.count(&gk::init::FIRST_FRAMES[..1]) + 1;
+            kprintln!(
+                "[genet] link: step {n}/{total} {} ({st}) (transmit producer index {}, consumer {}, umac cmd {:#x}, tdma ctrl {:#x})",
+                st.name,
+                wanted & 0xffff,
+                rd(ring_reg(TDMA, R_CONS_INDEX)) as u16,
+                rd(UMAC_CMD),
+                rd(dma_reg(TDMA, D_CTRL))
+            );
+            save_log();
+            TX_ANNOUNCED.store(true, Ordering::Relaxed);
+        }
+        // SAFETY: barrier: the descriptor before the producer index that releases it.
+        unsafe { core::arch::asm!("dsb sy", options(nostack, preserves_flags)) };
+        wr(ring_reg(TDMA, R_PROD_INDEX), wanted & 0xffff);
+        TX_RUNG.store(wanted, Ordering::Relaxed);
+    }
+}
+
 /// The 10-second line: whether the PHY sees a cable, what the controller's rings and counters say.
 fn report() {
     let phy = PHY_ADDR.load(Ordering::Relaxed);
     let bmsr = if phy == 0xff { None } else { mdio_read(phy, MII_BMSR) };
     kprintln!(
-        "[genet] link {} (PHY status {}), tx {} frames (dropped: {} link down, {} ring full), rx {} frames ({} bad, {} irqs); tx ring cons {} prod {}, rx ring prod {}; umac cmd {:#x}",
+        "[genet] link {} (PHY status {}), tx {} frames (dropped: {} link down, {} ring full, {} notx), rx {} frames ({} bad, {} irqs); tx ring cons {} prod {}, rx ring prod {}; umac cmd {:#x}",
         if LINK_UP.load(Ordering::Relaxed) { "up" } else { "down" },
         match bmsr {
             Some(v) => alloc::format!("{v:#06x}"),
@@ -659,6 +908,7 @@ fn report() {
         TX_FRAMES.load(Ordering::Relaxed),
         TX_LINK_DOWN.load(Ordering::Relaxed),
         TX_RING_FULL.load(Ordering::Relaxed),
+        TX_DISABLED.load(Ordering::Relaxed),
         RX_FRAMES.load(Ordering::Relaxed),
         RX_BAD.load(Ordering::Relaxed),
         RX_IRQS.load(Ordering::Relaxed),

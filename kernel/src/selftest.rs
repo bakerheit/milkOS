@@ -196,6 +196,13 @@ pub fn crash_if_asked(stage: &str) {
         }
         return;
     }
+    // `hang`: CPU 0 stops with interrupts off after 6 s on the desktop, like a frozen board (the watchdog test).
+    #[cfg(feature = "raspi")]
+    if stage == "late" && want == b"hang" {
+        crate::sched::sleep_ms(6000);
+        crate::rpi::watchdog::hang_cpu0();
+        return;
+    }
     // `serror` / `dabt` (at the early point): the exception dump instead of a panic, for the Pi's qemu test.
     // `serror` runs a fake SError through the real crash path (qemu cannot raise one); `dabt` is a real data
     // abort, a store to an address nothing maps, right after a checkpoint.

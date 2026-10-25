@@ -23,6 +23,7 @@
 //! * [`lcdbudget`]: the time limits that keep the display from ever delaying the boot (the early bring-up's budget, the print path's, when `milk.lcd=probe` may start).
 //! * [`lcdprobe`]: `milk.lcd=probe`, the card shown on each candidate set-up of a display whose controller is unknown.
 //! * [`touch`]: the XPT2046 touch chip beside it (commands, filter, calibration, pointer events).
+//! * [`watchdog`]: the power manager's watchdog (register values, when to arm, kick and stop it).
 //! * [`usb`]: xHCI TRBs, events and contexts, USB descriptors, and the HID boot keyboard and mouse.
 #![no_std]
 
@@ -49,9 +50,12 @@ pub mod sd;
 pub mod soc;
 pub mod touch;
 pub mod usb;
+pub mod watchdog;
 
 #[cfg(test)]
 mod fattests;
+#[cfg(test)]
+mod genetlinktests;
 #[cfg(test)]
 mod lcdsim;
 #[cfg(test)]

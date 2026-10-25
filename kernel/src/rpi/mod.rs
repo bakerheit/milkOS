@@ -9,6 +9,8 @@
 //!   one), as a block device.
 //! * [`genet`]: the Gigabit Ethernet MAC. Not modelled by qemu, so untested until hardware.
 //! * [`touch`]: the XPT2046 touch chip on SPI0 with no SPI panel (`milk.touch=xpt2046`): the touch glass of an HDMI display.
+//! * [`watchdog`]: the power manager's watchdog as a safety net for a frozen board (armed at the end of the boot,
+//!   kicked from the timer interrupt; `milk.watchdog=`).
 //! * [`spi`], [`lcd`]: SPI0 and the GPIO pins, and the 3.5-inch SPI display with its touch chip on
 //!   them (off unless `milk.lcd=` names a controller; rpikit::lcd and rpikit::touch are the pure parts).
 //!
@@ -30,6 +32,7 @@ pub mod rng;
 pub mod sdhci;
 pub mod spi;
 pub mod touch;
+pub mod watchdog;
 
 use core::arch::asm;
 
@@ -91,6 +94,7 @@ pub fn init() {
         genet::init();
     }
     serror_checkpoint("rpi-genet");
+    watchdog::configure();
 }
 
 /// Take a pending SError here and now, so the crash dump names this place (kernel/src/serror.rs;

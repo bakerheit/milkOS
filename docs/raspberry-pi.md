@@ -76,7 +76,9 @@ them, so every existing option works unchanged:
 | `milk.net="internet=on"` | the launcher's network policy (docs/networking.md) |
 | `milk.sdwrite=1` | allow writes to the SD card (`/dev/mmcblk0` is read-only otherwise: a card that also boots Raspberry Pi OS must not be written by accident; Disk Utility, `disks` and milkfs all see it read-only) |
 | `milk.disable=pcie,usb,genet,sdhci,rng` | start without a driver that misbehaves on a real board (edit `cmdline.txt`, no rebuild): `pcie` (and with it USB), `usb`, `genet`, `sdhci`, `rng` |
-| `milk.genet=probe` | run the Ethernet MAC's bring-up one register access at a time, with an SError checkpoint after each, and log `[genet] probe step N name ok` (or `FAILED`): names the exact access a board refuses (see "GENET bring-up") |
+| `milk.genet=probe` | run the Ethernet MAC's bring-up one register access at a time, with an SError checkpoint after each, and log `[genet] probe step N name ok` (or `FAILED`): names the exact access a board refuses (see "GENET bring-up"); it also names every step of the link-up path and the first frames in the log, saving the log to the card first ("GENET link-up") |
+| `milk.genet=nolink` / `norx` / `notx` / `polled` | bisect a freeze when the cable goes in (words can be combined with commas, `probe,norx`): the MAC is never programmed for a link / the receive DMA stays off / the transmit DMA stays off / the interrupt stays masked ("GENET link-up") |
+| `milk.watchdog=on` / `off` / `sim` | the power manager's watchdog as a safety net: armed at the end of the boot, kicked from the timer interrupt, resets a frozen board after 15 s; default on ("Watchdog") |
 | `milk.fbsize=WxH` / `auto` | the framebuffer (and so the desktop) size: `auto` (the default) follows the display mode the firmware has set up (the mailbox's physical size: 800x480 for a panel that takes that mode, 1920x1080 for a television), `WxH` forces a size (640x400 to 4096x2160); 1024x768 when the firmware reports nothing usable ("HDMI displays") |
 | `milk.touch=xpt2046` | the touch chip of an HDMI display, with no SPI panel (`milk.touch_cs=`, `milk.touch_irq=`, `milk.touch_cal=`, `milk.touch_rot=`: "HDMI displays") |
 | `milk.fbscale=N` | magnify the boot log and crash screen font N times (default 1; 2 from 1600 px wide) |
@@ -86,6 +88,7 @@ them, so every existing option works unchanged:
 | `milk.serror=trace` / `paranoid` / `off` | the SError checkpoints and the register write breadcrumbs ("Reading a crash"); `trace` is the default on the Pi image, `off` makes them no-ops, `paranoid` adds a checkpoint after every register write of the Pi drivers (slow; pins an SError to one register) |
 | `milk.crashtest=serror` / `dabt` | the exception dump instead of a panic, right after the display is up: a fake SError taken at a checkpoint (qemu cannot raise a real one), or a real data abort (a store to an unmapped address) |
 | `milk.logstorm=N` | once the boot is over, print N lines as fast as the console takes them: tests the SD card log's rate cap (`pi-log-multiboot-test`) |
+| `milk.crashtest=hang` | with the desktop up for 6 s, CPU 0 stops with interrupts off like a frozen board (tests the watchdog) |
 | `milk.crashtest=early` / `late` | panic on purpose right after the display is up / once the desktop has been up 8 s (tests the crash screens); `late-off` / `late-reset`: the desktop's Shut Down / Restart after 5 s (tests the power paths) |
 
 ## Putting it on a card
@@ -280,7 +283,7 @@ are `area-step`. Where they are:
 | `mbox-call` | at the end of every mailbox transaction (the firmware wrote into our memory by DMA) |
 | `pcie-<step>`, `pcie-order-<name>`, `pcie-bar-read`, `pcie-park`, `pcie-done`, `pcie-xhci-start`, `pcie-xhci-poll` | the PCIe + VL805 bring-up ("PCIe + USB"): one per step, one per handshake order, around the first BAR read, the park after a failure, the end, and the xHCI driver's start and polling loop. An SError taken at a `pcie-*` checkpoint (or at any checkpoint of the USB thread during the bring-up) is survived, not fatal |
 | `sdhci-clock` `sdhci-card` | inside the SD driver's init |
-| `genet-buffers` `genet-power-up` `genet-umac-reset` `genet-dma-off` `genet-umac-setup` `genet-rings` `genet-phy` `genet-irq` `genet-irq-on` `genet-dma-on` | the sub-steps of the Ethernet MAC's bring-up, in order (the driver catches an SError at all of them but `genet-buffers`: see "GENET bring-up") |
+| `genet-buffers` `genet-power-up` `genet-umac-reset` `genet-dma-off` `genet-umac-setup` `genet-rings` `genet-phy` `genet-irq` `genet-dma-on` `genet-link-up` | the sub-steps of the Ethernet MAC's bring-up, in order, and the end of the link-up path (the driver catches an SError at all of them but `genet-buffers`: see "GENET bring-up", "GENET link-up") |
 | `virtio-init` `crypto-init` `irq-enable` `lcd-irqs-live` `memtest` `fs-init` | the rest of the early boot |
 | `sched-init-entry` `sched-init` `smp-init` `audit-journal-sysstat` | around the scheduler, SMP |
 | `smp-cpu-entry` `smp-cpu-up` | on each secondary CPU as it comes up |
@@ -972,13 +975,13 @@ Not done: the address filter, interrupt-driven transmit completion, checksum off
 
 **GENET bring-up** (`rpikit::genet::init` is the step table, `rpi/genet.rs` runs it). The order, each group ending in a checkpoint
 (`genet-power-up`, `genet-umac-reset`, `genet-dma-off`, `genet-umac-setup`, `genet-rings`, then after the PHY `genet-phy`, `genet-irq`,
-`genet-irq-on`, `genet-dma-on`):
+`genet-dma-on`; the link-up path ends in `genet-link-up`):
 1. power: clear the power-down bits of `EXT_PWR_MGMT` (genet+0x80);
 2. reset: write 0 to `SYS_RBUF_FLUSH_CTRL` (genet+0x08, the whole register: it can come up with its UMAC-reset bit set), pulse bit 1 of it, write 0 to `SYS_TBUF_FLUSH_CTRL`,
    then `UMAC_CMD` software reset (with local loopback, as the hardware wants), `UMAC_CMD` = 0;
 3. only now the DMA engines and the UMAC: clear the enable bits of `TDMA` / `RDMA` `DMA_CTRL` (genet+0x5044 / 0x3044), pulse `UMAC_TX_FLUSH` (genet+0xb34);
 4. RGMII port mode, MAC address, frame size, counters, `RBUF`/`TBUF` control, `UMAC_CMD`;
-5. the descriptors and ring registers; then the PHY over MDIO; then interrupts masked and cleared, the GIC line, receive interrupts on; then the rings and the DMA engines on.
+5. the descriptors and ring registers; then the PHY over MDIO; then interrupts masked and cleared, the GIC line enabled (the controller's receive interrupts stay masked until a link: "GENET link-up"); then the rings and the DMA engines on.
 
 *What the first real board showed* (Pi 4B rev 1.5): the version register read fine (genet+0x00 = 0x06000000), then an SError was taken at `genet-dma-off`: the
 access that the SoC refused was one of the first accesses to the UMAC / DMA registers (`genet+0x5044`, `0x3044`, `0xb34`; the earlier driver touched them
@@ -996,11 +999,91 @@ steps of the group, then `skipping the Ethernet controller`; the rest of the boo
 on the card (`MILKLOG.TXT`) has all of it. qemu's raspi4b has no GENET: the option is accepted and the driver says `no Ethernet controller in the device tree` (`pi-qemu-test`).
 `milk.disable=genet` skips the driver without touching the controller at all.
 
-*What to look for in the next real log.* (1) `probe step ... ok` all the way to `genet-dma-on`, then `[genet] PHY at MDIO address 1, id 0x600d84a2` and a `link up` line: the
+*What to look for in the next real log.* (1) `probe step ... ok` all the way to `genet-dma-on` (66 steps; the 67th of the first real run, the interrupt unmask, now belongs to the link-up path), then `[genet] PHY at MDIO address 1, id 0x600d84a2` and a `link up` line: the
 reset order was the fix. (2) `probe step N name FAILED`: that register is refused whatever the order; the line before it says which and in what state (the read of `ext-pwr-read`
 shows the power register, the `umac-reset-*` steps the reset bit); the likely next suspects are the clock/power domain of the block (firmware: the GENET clock is not
 in the tree the firmware hands over, so it should be on) and the order of the first access. (3) Everything ok but `no PHY answered on MDIO`: the MAC is fine, the
 problem is the MDIO clock / PHY reset. (4) Link up but no frames: RGMII delays (`ID_MODE_DIS`), the descriptors.
+
+### GENET link-up: the freeze when the cable goes in
+
+*What the real board showed.* With the bring-up fixed, the whole controller initialised on a Pi 4B rev 1.5 (all probe steps ok, the BCM54213PE found at MDIO address 1, `link down` every 10 s
+while no cable was in). Then the cable went in: the log of that boot ends with `[genet] link up: 1000 Mb/s full duplex (...)` and **nothing after it**: no exception dump, no panic,
+no end line, no further 10-second report, and the screen went blue (a monitor's "no signal"). A second boot, cable in from the start, stopped the same way at about 30 s, when the link would come up (the
+last second of the log is not on the card: the writer saves about once a second). So the whole machine stops, HDMI scan-out included: a hang of the SoC bus (or a power glitch), not a CPU exception
+(the SError and abort handlers never ran) and not a software deadlock (a deadlocked CPU leaves the picture frozen, not blue; the kernel's spin lock reports re-entry as a panic).
+
+*What is known from the log.* (1) The `link up` line is printed *after* the last register write of the old link-up code (`UMAC_CMD`, `EXT_RGMII_OOB_CTRL`) and after the flag that lets the network stack send. So those
+writes did not hang: it is the traffic that follows, in the next second. (2) Before the link, the receive DMA engine was already on and the MAC's receiver off; the transmitter was off and the stack's frames were
+dropped (the DHCP client's `dropped: N link down` count). The first thing that happens at link-up is therefore: the MAC's receiver goes live (the interface is in promiscuous mode, so the first frame to reach it
+is whatever the LAN sends: ARP, IPv6 neighbour discovery, mDNS), the receive DMA writes a frame into memory, the receive interrupt (SPI 157, INTID 189) fires, and within a second the stack's first frame (the DHCP discover) goes through the transmit DMA.
+(3) The real tree's `dma-ranges` for the controller's bus (`scb`) is the identity for the first 4 GiB, so the buffers at `0x2803000..0x2843000` are reachable by the address the driver writes into the descriptors. (4) The receive interrupt handler cannot deadlock with the poll thread: it only
+sets a flag and wakes the net thread (`NET_WQ`), and every lock on that path masks interrupts while held.
+
+*The working theory (low confidence; nothing can be proven without the board).* A hang that leaves no trace points to a bus transaction that never completes, which on this SoC means one of the controller's
+own master accesses (the receive or transmit DMA writing/reading memory or its descriptors) or the MAC's receive path starting with an RGMII clock/ring set-up that the real hardware does not accept: about 55 % together, receive first
+(it needs no software step). The interrupt path is next (about 15 %: the line is level, the handler clears the status, but there is no model of this
+block to prove the clear works); a brown-out when the PHY's link current appears (about 15 %: check `throttled flags` in the next report after a boot with a different supply, and whether the USB hub on the board is
+powered by the Pi) and something not thought of (the rest). The driver's register values are those of Linux's `bcmgenet`
+as far as the public driver is known: this change brings the order of the link-up writes in line with `bcmgenet_mii_setup` (the RGMII block's link bit first, then the UMAC's speed and duplex, then the receiver and transmitter), and moves the
+receive interrupt unmask from the bring-up to the link-up path (right after the receiver is on), so the log can say when it happens. Neither is a change that can be defended as *the* fix; the defaults are otherwise unchanged. The next trip is for bisecting.
+
+*How the next real run names the step.* `milk.genet=probe` (already in `cmdline.txt`) now also covers the link-up path. Before each step the Ethernet thread logs `[genet] link: step N/M name (what it does)` and **saves the log to the card**
+(`logfile::sync_now`, the `logsync` path), so the file ends with the last step that *started*. The steps (`rpikit::genet::init::LINK_UP`, host-tested for order):
+
+| # | step | what |
+|---|---|---|
+| 1 | `link-resolve` | read the PHY's registers 4, 5, 9, 10 over MDIO, work out speed and duplex |
+| 2 | `link-rgmii-link` | `EXT_RGMII_OOB_CTRL` \|= `RGMII_LINK` (genet+0x8c, bit 4) |
+| 3 | `link-umac-speed` | `UMAC_CMD` speed and duplex bits (genet+0x808) |
+| 4 | `link-mac-rx-en` | `UMAC_CMD` \|= `RX_EN`: the MAC's receiver goes live, frames start to arrive |
+| 5 | `link-irq-unmask` | `INTRL2_MASK_CLEAR` <- receive-done bits (genet+0x214): the interrupt can fire |
+| 6 | `link-mac-tx-en` | `UMAC_CMD` \|= `TX_EN` |
+| 7 | `link-announce` | the network stack is told the link is up (`[genet] link up: ...` follows) |
+
+then `[genet] link: N steps done`, and two lines that happen once, each *before* the CPU touches it (the log is saved first): `first-rx-frame` (the receive producer index moved: next the CPU reads the descriptor and
+the buffer; until the line is saved the stack is not allowed to look) and `first-tx-kick` (the first frame is in its descriptor: next the transmit producer index, the doorbell, is written; in probe mode the Ethernet thread rings
+every doorbell, at most 10 ms late, so that it can save the log first). A line `the first interrupt was taken and returned` follows the first interrupt (that one is after the fact: the interrupt handler cannot save the log).
+An SError during these steps is caught after each of them in probe mode (and at `genet-link-up` otherwise): the MAC is switched off again, the log says which step, and the link is not tried again this boot.
+
+*Reading the file after the freeze* (`scripts/pi-readlog.sh ... --last`): the last `[genet] link: step` line is the culprit's step, or the step before the access the next thing would have done:
+
+| the file ends with | meaning |
+|---|---|
+| `link: step 1..3 ...` | the MDIO reads or the first UMAC/RGMII writes hang the bus: the PHY's clock, not traffic. Run `nolink` to see if the cable is safe without any MAC programming |
+| `link: step 4/7 link-mac-rx-en` (no `step 5`) | the MAC's receiver or the first received frame (RBUF, the receive DMA's first write to memory) hangs it. `norx` tells the DMA from the MAC |
+| `link: step 5/7 link-irq-unmask` (no `step 6`) | the interrupt: either it fires and the handler hangs (`polled` tells) or the frame traffic arriving after step 4 hangs it a few ms later |
+| `link: step 6/7 link-mac-tx-en` | the transmitter's enable (unlikely: nothing is sent yet) |
+| `link: N steps done` and `link up` but no `first-rx-frame` | a frame never landed, or the thread was stopped before it saw it: look at the `[genet] link up` 10-second reports (if there are any, the board lived) |
+| `first-rx-frame` is the last line | the CPU touching the receive descriptor/buffer (cache maintenance, `RxBuf`), or the stack processing the first frame |
+| `first-tx-kick` is the last line | the doorbell write hangs: the transmit DMA reading its descriptor or the buffer |
+| `the first interrupt was taken` is the last line | something after it; check the 10-second report for `irqs` growing |
+| no `link:` line at all, the file stops earlier | the freeze is before the link-up path; the log writer's last second was lost: add `milk.serror=paranoid` or retry |
+
+*Bisecting with one edit per trip* (`cmdline.txt`: `milk.genet=probe,<word>`; all words can be combined). Each one keeps the controller up and the PHY running:
+
+| option | what it does | the cable in, if the board **stays alive** it was... |
+|---|---|---|
+| `nolink` | the MAC is never programmed for a link; the stack sees no link, no DHCP; the log says `the PHY has a link (milk.genet=nolink ...)` | (a baseline: the freeze needs the MAC programmed/enabled) |
+| `norx` | link up, MAC programmed, **the receive DMA engine and the interrupt never switched on** (the MAC's receiver is on and its FIFO fills and drops) | the receive DMA writing to memory, or the interrupt it raises |
+| `notx` | link up, **the transmit DMA engine never switched on**, the stack's frames are dropped and counted (`notx` in the 10-second line) | the transmit DMA (the first DHCP frame) |
+| `polled` | everything on, but **the interrupt stays masked**: the Ethernet thread polls the rings every 10 ms | the interrupt (the line, the handler, the GIC), not the DMA |
+
+The default is the driver in Linux's order. `nolink` is expected to survive (by construction), and of the others, `norx` is expected to be the one that changes the outcome if the hang is a DMA write, `polled` if it is the interrupt; `notx` is the least likely. If
+`norx,notx` survives and each alone does not, both DMA engines are involved (the controller's bus master as a whole: look at the SCB/arbiter side, `DMA_SCB_BURST_SIZE`, the burst length). If everything above freezes at step 4, the MAC's receiver itself (RGMII RXC, the delay mode: `phy-mode rgmii-rxid` in the real tree) is the suspect.
+
+### Watchdog: a frozen board resets itself
+
+`rpi/watchdog.rs`, rules in `rpikit::watchdog` (host-tested with a fake clock). The BCM2711 power manager's watchdog (the block `reboot` uses) is armed at the **very end of `kmain`**, after the display, every driver and the slow steps, and kicked
+once a second from the timer interrupt of CPU 0; 15 s without a kick (a hung bus, interrupts off for good) and the SoC resets; the firmware boots the kernel again, and the next boot's log shows `boot N` without an end line followed by `boot N+1`
+(`pi-readlog.sh --list`: the "power cut, crash" end). Nobody has to pull the power. It is stopped by a **panic and by every exception dump** (the crash text stays on the screen until read), and by `power::restart` / `power::power_off`
+(Shut Down and Restart set up their own short countdown after that). A boot that is merely slow is never reset: nothing is armed until the boot is over. The system report (every 5 minutes) has a `watchdog:` line with the number of kicks and the longest gap between two.
+
+`milk.watchdog=on|off|sim`, default **on**. `on` arms the hardware only if the device tree has the block (`watchdog@7e100000`, the real tree has it); qemu's raspi4b models the registers but resets at once when `RSTC` is written instead of counting down, so
+there it logs `not armed: the device tree has no power manager watchdog` and stays off. `sim` runs the same rules with no register and a 4 s deadline: another CPU resets the board through the power manager if CPU 0's tick stops kicking; that is what the qemu test
+uses (`pi-qemu-test` boots 21 to 24: skipped cleanly, kept alive past the deadline by the kick, disarmed by Shut Down, and `milk.crashtest=hang` stopping CPU 0 with interrupts off: the board is reset and the kernel boots again). The real countdown
+(the 15 s timeout in the register) is not testable on qemu; the first real run proves it: boot with the cable in and `milk.genet=probe`; if the board freezes, it must reset by itself about 15 s later (and boot 2 shows boot 1 without an end line). If it does **not** reset, the freeze also stopped the
+power manager (or the SoC's clock), and `milk.watchdog=off` is no loss. The risk: a legitimate stretch with interrupts off for more than 15 s would reset a working board (nothing in the kernel does that: the longest are tens of milliseconds); `milk.watchdog=off` removes it.
 
 ## What qemu can and cannot test (summary)
 

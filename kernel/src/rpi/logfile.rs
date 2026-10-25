@@ -867,6 +867,8 @@ fn fmt_end(out: &mut [u8], boot: u32, kind: &str) -> usize {
 /// logged, the crash dump included, within about a second. Never blocks for long: a flush in progress on
 /// another CPU gets half a second, then its state is taken over and the unwritten text is written again from the buffer.
 pub fn crash_flush() {
+    // The dump stays on the screen until somebody has read it: no watchdog reset under it.
+    super::watchdog::disarm_for_crash();
     logbuf::emergency();
     CRASHING.store(true, Ordering::Relaxed);
     // One CPU at a time owns the file in a crash; another that crashes meanwhile leaves it to the first.

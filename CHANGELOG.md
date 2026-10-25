@@ -15,6 +15,13 @@
   the XPT2046 on SPI0 with no SPI panel, pointer events in the framebuffer's pixels, only its own pins touched (logged), on a thread that starts after the boot is
   over; `milk.lcd=` and `milk.touch=` are independent. New `pi-bootdir-test`; `pi-qemu-test` boots 20 to 25 check the sizes, the screen dumps and the touch driver.
   The About window and Settings > About name the real board instead of "qemu virt". Untested on the panel itself.
+- The Ethernet freeze when the cable goes in (first real board: the log ends at `link up` and the screen goes blue) is instrumented and bisectable, and a frozen board now resets itself
+  ("GENET link-up" and "Watchdog" in docs/raspberry-pi.md). `milk.genet=probe` names every step of the new link-up path (`rpikit::genet::init::LINK_UP`, host-tested) and the first received frame and first
+  transmit doorbell, saving the log to the card *before* each, so the file ends with the step that was running. New options to bisect with one `cmdline.txt` edit per trip: `milk.genet=nolink` (the MAC is never
+  programmed for a link), `norx` (receive DMA and interrupt stay off), `notx` (transmit DMA stays off), `polled` (interrupt masked); combinable with commas. The link-up writes follow Linux's order, and the receive interrupt is
+  unmasked by the link-up path instead of the bring-up. The cause is not known; the docs say what each outcome of the next run means. New `milk.watchdog=on|off|sim` (default on): the power manager's watchdog is armed at the end of the
+  boot, kicked once a second from CPU 0's timer interrupt, and resets a frozen board after 15 s (the next boot's log shows the previous boot without an end line); a panic or exception dump, Shut Down and Restart stop it first. On qemu, whose
+  power manager resets at once, it stays off and `sim` tests the rules; `pi-qemu-test` boots 21 to 24 (options skipped cleanly, kept alive, disarmed by Shut Down, `milk.crashtest=hang` resets the board). Rules in `rpikit::watchdog`, host-tested with a fake clock.
 - The Ethernet controller's bring-up no longer crashes the first real board with an SError ("GENET bring-up" in docs/raspberry-pi.md). The real log showed the
   SoC refusing one of the first accesses to the UMAC / DMA registers: they were touched before the SYS block's reset register was written, so the blocks were
   most likely still held in reset. The bring-up is now an ordered table (`rpikit::genet::init`, host-tested for its order, values and checkpoint labels): power,

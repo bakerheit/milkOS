@@ -233,6 +233,9 @@ pub extern "C" fn kmain() -> ! {
     // The desktop: compositor, window manager and shell, in its own thread. It owns the
     // screen and draws the mouse cursor from here on.
     sched::spawn_prio("wm", sched::Priority::High, wm::run);
+    // The boot is over: from here a kernel that stops kicking is a frozen one (rpi/watchdog.rs).
+    #[cfg(feature = "raspi")]
+    rpi::watchdog::arm();
     // kmain is now just thread 0.
     selftest::crash_if_asked("late");
     loop {

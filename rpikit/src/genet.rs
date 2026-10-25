@@ -88,6 +88,17 @@ pub fn resolve(adv: u16, lpa: u16, ctrl1000: u16, stat1000: u16) -> Option<Negot
     None
 }
 
+/// The UMAC command register with the speed and duplex bits set for `n` (other bits kept).
+pub const fn umac_cmd_for(cmd: u32, n: Negotiated) -> u32 {
+    let speed = match n.mbps {
+        1000 => 2,
+        100 => 1,
+        _ => 0,
+    };
+    let cleared = cmd & !(3 << regs::CMD_SPEED_SHIFT | regs::CMD_HD_EN);
+    cleared | speed << regs::CMD_SPEED_SHIFT | if n.full { 0 } else { regs::CMD_HD_EN }
+}
+
 /// The MAC address split into the two UMAC registers.
 pub const fn mac_registers(m: [u8; 6]) -> (u32, u32) {
     (
@@ -203,7 +214,7 @@ pub mod regs {
     pub const MAX_FRAME: usize = 1514;
 }
 
-pub use init::{Mode, Op, Step};
+pub use init::{Gate, Op, Options, Step};
 
 /// The bring-up as data: which register, in what order, with which checkpoint after it, so the order is
 /// reviewable and host-tested, and `milk.genet=probe` can run it one access at a time.
@@ -211,24 +222,96 @@ pub mod init {
     use super::regs::*;
     use core::fmt;
 
-    /// `milk.genet=`: how the driver runs its bring-up.
+    /// Which part of the controller a step belongs to, so a `milk.genet=` option can leave it out.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub enum Mode {
-        /// Group checkpoints only (a few accesses between two); the cheap default.
-        Normal,
-        /// A checkpoint after every single access, each logged as `step N name ok`.
-        Probe,
+    pub enum Gate {
+        /// Always runs.
+        Always,
+        /// The receive DMA engine (left off by `norx`).
+        RxDma,
+        /// The transmit DMA engine (left off by `notx`).
+        TxDma,
+        /// The interrupt line (left masked by `polled`, and by `norx`: nothing would raise it).
+        Irq,
     }
 
-    impl Mode {
-        /// From the option's value (None: absent). Unknown words are `Err` with the mode used instead.
-        pub fn parse(v: Option<&[u8]>) -> Result<Mode, Mode> {
-            match v {
-                None => Ok(Mode::Normal),
-                Some(b"probe") => Ok(Mode::Probe),
-                Some(b"normal" | b"off" | b"0" | b"") => Ok(Mode::Normal),
-                Some(_) => Err(Mode::Normal),
+    /// `milk.genet=`: a comma separated list of words, how the driver runs. All off (no option) is the normal driver.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct Options {
+        /// A checkpoint after every single access, each logged as `step N name ok`, and a log flush before each step
+        /// of the link-up path and of the first frames (`link: step N name`).
+        pub probe: bool,
+        /// The controller is brought up and the PHY runs, but the MAC is never programmed for a link and the network
+        /// stack never sees the link: a cable can be in.
+        pub nolink: bool,
+        /// Link up and MAC programmed, but the receive DMA engine stays off (and with it the interrupt).
+        pub norx: bool,
+        /// Link up and MAC programmed, but the transmit DMA engine stays off: nothing is ever sent.
+        pub notx: bool,
+        /// The interrupt stays masked: the rings are polled by the Ethernet thread only.
+        pub polled: bool,
+    }
+
+    impl Options {
+        /// From the option's value (None: absent). Words are separated by commas; `normal`, `off`, `0` and the empty
+        /// word mean nothing. The second part is the first word nobody knows (the rest is still used).
+        pub fn parse(v: Option<&[u8]>) -> (Options, Option<&[u8]>) {
+            let mut o = Options::default();
+            let mut unknown = None;
+            for w in v.unwrap_or(b"").split(|&c| c == b',') {
+                match w {
+                    b"probe" => o.probe = true,
+                    b"nolink" => o.nolink = true,
+                    b"norx" => o.norx = true,
+                    b"notx" => o.notx = true,
+                    b"polled" => o.polled = true,
+                    b"" | b"normal" | b"off" | b"0" => {}
+                    other => unknown = unknown.or(Some(other)),
+                }
             }
+            (o, unknown)
+        }
+
+        /// Does a step of this part run?
+        pub const fn runs(&self, g: Gate) -> bool {
+            match g {
+                Gate::Always => true,
+                Gate::RxDma => !self.norx,
+                Gate::TxDma => !self.notx,
+                Gate::Irq => !self.polled && !self.norx,
+            }
+        }
+
+        /// Is anything but `probe` asked for?
+        pub const fn degraded(&self) -> bool {
+            self.nolink || self.norx || self.notx || self.polled
+        }
+
+        /// How many steps of `steps` run with these options.
+        pub fn count(&self, steps: &[Step]) -> usize {
+            steps.iter().filter(|s| self.runs(s.gate)).count()
+        }
+
+        /// The words, for the log (`probe,norx`; `normal` for none).
+        pub fn write_words(&self, f: &mut dyn fmt::Write) -> fmt::Result {
+            let mut first = true;
+            for (on, w) in [
+                (self.probe, "probe"),
+                (self.nolink, "nolink"),
+                (self.norx, "norx"),
+                (self.notx, "notx"),
+                (self.polled, "polled"),
+            ] {
+                if on {
+                    f.write_str(if first { "" } else { "," })?;
+                    f.write_str(w)?;
+                    first = false;
+                }
+            }
+            if first {
+                f.write_str("normal")?;
+            }
+            Ok(())
         }
     }
 
@@ -252,6 +335,12 @@ pub mod init {
         ClearDescriptors,
         /// Hand the receive buffers to the hardware (descriptors only).
         PostRxDescriptors,
+        /// Link-up path: read the PHY's advertisement and the partner's abilities (MDIO) and work out speed and duplex.
+        LinkResolve,
+        /// Link-up path: put the negotiated speed and duplex into the UMAC command register (read-modify-write).
+        MacSpeed,
+        /// No access of its own: a point in the story the log wants to name (the text says what happens next).
+        Event(&'static str),
     }
 
     /// One access of the bring-up.
@@ -262,6 +351,8 @@ pub mod init {
         /// Offset from the controller base (0 for a delay).
         pub reg: usize,
         pub op: Op,
+        /// Which `milk.genet=` option leaves it out.
+        pub gate: Gate,
         /// `Some(label)` ends a group: the checkpoint `label` follows this step even outside probe mode, and
         /// a pending SError taken there is blamed on the steps of the group.
         pub group_end: Option<&'static str>,
@@ -279,15 +370,24 @@ pub mod init {
                 Op::DelayUs(us) => write!(f, "wait {us} us"),
                 Op::ClearDescriptors => write!(f, "clear {TOTAL_DESC} descriptors of each DMA engine"),
                 Op::PostRxDescriptors => write!(f, "post {RING_SIZE} receive buffers"),
+                Op::LinkResolve => write!(f, "read the PHY's registers 4, 5, 9 and 10 over MDIO"),
+                Op::MacSpeed => write!(f, "genet+{:#x}: speed and duplex bits <- the negotiated mode", self.reg),
+                Op::Event(what) => f.write_str(what),
             }
         }
     }
 
     const fn s(name: &'static str, reg: usize, op: Op) -> Step {
-        Step { name, reg, op, group_end: None }
+        Step { name, reg, op, gate: Gate::Always, group_end: None }
     }
     const fn end(name: &'static str, reg: usize, op: Op, label: &'static str) -> Step {
-        Step { name, reg, op, group_end: Some(label) }
+        Step { name, reg, op, gate: Gate::Always, group_end: Some(label) }
+    }
+    const fn gated(name: &'static str, reg: usize, op: Op, gate: Gate) -> Step {
+        Step { name, reg, op, gate, group_end: None }
+    }
+    const fn gated_end(name: &'static str, reg: usize, op: Op, gate: Gate, label: &'static str) -> Step {
+        Step { name, reg, op, gate, group_end: Some(label) }
     }
 
     /// Bits of the DMA control registers the disable step clears: the engine enable and every ring's enable.
@@ -385,16 +485,44 @@ pub mod init {
         end("irq-clear-all", INTRL2_CLEAR, Op::Write(0xffff_ffff), "genet-irq"),
     ];
 
-    /// Once the line is registered: receive interrupts on.
-    pub const IRQ_UNMASK: &[Step] =
-        &[end("irq-unmask-rx", INTRL2_MASK_CLEAR, Op::Write(IRQ_RXDMA_DONE), "genet-irq-on")];
-
-    /// Last: the default ring and the DMA engines on.
+    /// Last: the default ring and the DMA engines on (each left off by its option).
     pub const DMA_ON: &[Step] = &[
-        s("rdma-ring-cfg", dma_reg(R, D_RING_CFG), Op::Write(1 << DEFAULT_RING)),
-        s("tdma-ring-cfg", dma_reg(T, D_RING_CFG), Op::Write(1 << DEFAULT_RING)),
-        s("rdma-on", dma_reg(R, D_CTRL), Op::Set(DMA_ON_BITS)),
-        end("tdma-on", dma_reg(T, D_CTRL), Op::Set(DMA_ON_BITS), "genet-dma-on"),
+        gated("rdma-ring-cfg", dma_reg(R, D_RING_CFG), Op::Write(1 << DEFAULT_RING), Gate::RxDma),
+        gated("tdma-ring-cfg", dma_reg(T, D_RING_CFG), Op::Write(1 << DEFAULT_RING), Gate::TxDma),
+        gated("rdma-on", dma_reg(R, D_CTRL), Op::Set(DMA_ON_BITS), Gate::RxDma),
+        gated_end("tdma-on", dma_reg(T, D_CTRL), Op::Set(DMA_ON_BITS), Gate::TxDma, "genet-dma-on"),
+    ];
+
+    /// The link-up path, run by the Ethernet thread when the PHY reports a link (`nolink` never runs it). Linux's driver
+    /// does the same things in this order (`bcmgenet_mii_setup`: the RGMII block's link bit first, then the UMAC's
+    /// speed and duplex); the MAC's receiver and transmitter go on last, the receive interrupt between them. After the
+    /// last step the network stack may send. In `milk.genet=probe` the log is saved to the card before each step.
+    pub const LINK_UP: &[Step] = &[
+        s("link-resolve", 0, Op::LinkResolve),
+        s("link-rgmii-link", EXT_RGMII_OOB_CTRL, Op::Set(RGMII_LINK)),
+        s("link-umac-speed", UMAC_CMD, Op::MacSpeed),
+        s("link-mac-rx-en", UMAC_CMD, Op::Set(CMD_RX_EN)),
+        gated("link-irq-unmask", INTRL2_MASK_CLEAR, Op::Write(IRQ_RXDMA_DONE), Gate::Irq),
+        s("link-mac-tx-en", UMAC_CMD, Op::Set(CMD_TX_EN)),
+        end("link-announce", 0, Op::Event("the network stack is told the link is up"), "genet-link-up"),
+    ];
+
+    /// The first traffic after a link-up, named once each in `milk.genet=probe` (the log is saved first): the first
+    /// frame the controller has received (before the CPU touches its descriptor or buffer) and the first frame handed
+    /// to the transmitter (before the doorbell).
+    pub const FIRST_FRAMES: &[Step] = &[
+        gated(
+            "first-rx-frame",
+            0,
+            Op::Event("the controller says a frame has landed; next the CPU reads its descriptor and buffer"),
+            Gate::RxDma,
+        ),
+        gated(
+            "first-tx-kick",
+            0,
+            Op::Event("the first frame is in its descriptor; next the transmit producer index is written"),
+            Gate::TxDma,
+        ),
     ];
 
     /// The steps of the group that step `i` belongs to (from the step after the previous group's end through the

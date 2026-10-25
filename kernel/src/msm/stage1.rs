@@ -90,22 +90,38 @@ fn psci_version() -> Option<u32> {
     (r as i32 >= 0).then_some(r)
 }
 
-/// Wait until the counter reaches `deadline` (no interrupts, no sleeping), petting the watchdog
-/// a few times a second if asked to.
-fn wait_until(deadline: u64, wdt: Option<usize>, freq: u64) {
-    let mut next = 0;
-    loop {
-        let now = timer::counter();
-        if now >= deadline {
-            break;
+/// What the loops that wait keep doing on the side, if asked to: pet the watchdog, kick the display
+/// controller's control path.
+#[derive(Clone, Copy)]
+struct Chores {
+    wdt: Option<usize>,
+    kick: Option<usize>,
+    freq: u64,
+}
+
+impl Chores {
+    /// Wait until the counter reaches `deadline` (no interrupts, no sleeping).
+    fn wait_until(self, deadline: u64) {
+        let (mut next_pet, mut next_kick) = (0, 0);
+        loop {
+            let now = timer::counter();
+            if now >= deadline {
+                break;
+            }
+            if let Some(b) = self.wdt
+                && now >= next_pet
+            {
+                crate::msm::wdt::pet(b);
+                next_pet = now + self.freq / 4;
+            }
+            if let Some(b) = self.kick
+                && now >= next_kick
+            {
+                crate::msm::fb::kick(b);
+                next_kick = now + self.freq / 10;
+            }
+            core::hint::spin_loop();
         }
-        if let Some(b) = wdt
-            && now >= next
-        {
-            crate::msm::wdt::pet(b);
-            next = now + freq / 4;
-        }
-        core::hint::spin_loop();
     }
 }
 
@@ -123,6 +139,11 @@ pub fn run() -> ! {
     if let Some(b) = pet {
         crate::msm::wdt::pet(b);
     }
+    let kick = match (opts.kick, dtb.as_ref()) {
+        (Some(i), Some(d)) => crate::msm::fb::kick_probe(d, i),
+        _ => None,
+    };
+    let chores = Chores { wdt: pet, kick, freq };
     let found = crate::msm::fb::locate(dtb.as_ref(), &opts);
     let mut drawn = false;
     let mut geometry_err = None;
@@ -139,6 +160,9 @@ pub fn run() -> ! {
         }
     }
     let shown_at = timer::counter();
+    if opts.crashtest == Some(CrashTest::Pre) {
+        panic!("msm.crashtest=pre: stopping before memory is set up");
+    }
 
     // 2. Memory, then the rest.
     crate::percpu::init_boot();
@@ -163,9 +187,9 @@ pub fn run() -> ! {
     }
     // The pattern stays up for its time, counted from when it was drawn.
     match opts.hold {
-        Hold::Seconds(s) => wait_until(shown_at + s as u64 * freq, pet, freq),
+        Hold::Seconds(s) => chores.wait_until(shown_at + s as u64 * freq),
         Hold::Forever if drawn => loop {
-            wait_until(timer::counter() + freq, pet, freq);
+            chores.wait_until(timer::counter() + freq);
         },
         Hold::Forever => {}
     }
@@ -202,7 +226,7 @@ pub fn run() -> ! {
         }
         _ => {}
     }
-    idle(dtb.as_ref(), &opts, console_rows, freq, pet)
+    idle(dtb.as_ref(), &opts, console_rows, chores)
 }
 
 /// The line in the log (and on the console, which replays it) that says the pattern was drawn and how.
@@ -351,11 +375,8 @@ fn cmdline_head(a: &[u8]) -> &[u8] {
 }
 
 /// The calm end: once a second the counter on the last console row and the marker on the band move.
-fn idle(dtb: Option<&Dtb>, opts: &Opts, rows: usize, freq: u64, pet: Option<usize>) -> ! {
-    let kick = match (opts.kick, dtb) {
-        (Some(i), Some(d)) => crate::msm::fb::kick_probe(d, i),
-        _ => None,
-    };
+fn idle(dtb: Option<&Dtb>, opts: &Opts, rows: usize, chores: Chores) -> ! {
+    let freq = chores.freq;
     if let (true, Some(d)) = (opts.mdp_dump, dtb) {
         crate::msm::fb::mdp_dump(d, freq);
     }
@@ -370,14 +391,14 @@ fn idle(dtb: Option<&Dtb>, opts: &Opts, rows: usize, freq: u64, pet: Option<usiz
     let mut secs: u64 = 0;
     loop {
         let now = timer::counter();
-        if let Some(base) = kick
+        if let Some(base) = chores.kick
             && now >= kick_at
         {
             crate::msm::fb::kick(base);
             kick_at = now + freq / 10;
         }
         if now >= next {
-            if let Some(b) = pet {
+            if let Some(b) = chores.wdt {
                 crate::msm::wdt::pet(b);
             }
             update(secs, rows);

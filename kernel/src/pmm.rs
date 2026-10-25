@@ -347,6 +347,13 @@ impl Pmm {
 
 static PMM: SpinLock<Option<Pmm>> = SpinLock::new(None);
 
+/// Is the allocator set up (and not locked by whoever is crashing)? For the Pixel 2's crash screen,
+/// which must not allocate when it cannot.
+#[cfg(feature = "msm8998")]
+pub fn is_ready() -> bool {
+    PMM.try_lock().is_some_and(|g| g.is_some())
+}
+
 fn with<R>(f: impl FnOnce(&mut Pmm) -> R) -> R {
     f(PMM.lock().as_mut().expect("pmm not initialised"))
 }

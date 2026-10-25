@@ -110,8 +110,9 @@ If something is off, try the variants of the same image (the same kernel, anothe
   milkos-pixel2-kick.img      also pokes the display controller ten times a second (use if the screen
                               stays on the bootloader's picture while the image runs: a panel that
                               needs a refresh command; read docs/pixel2.md first, it writes a register)
-  milkos-pixel2-mdp.img       reads (never writes) some display controller registers into the log, to tell
-                              how the panel is driven (docs/pixel2.md, "If the screen does not change")
+  milkos-pixel2-mdp.img       reads (never writes) some display controller registers into the log: how the
+                              panel is driven, and where the bootloader's picture is, how long its rows are and
+                              in what byte order (docs/pixel2.md, "If the screen does not change")
   milkos-pixel2-wdt.img       pets the SoC's watchdog once a second (one register write). Nobody else does while
                               this image runs: if the phone restarts by itself some 15 to 30 seconds after the
                               counter started, that is probably the watchdog, not a crash (the last number

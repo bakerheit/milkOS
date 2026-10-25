@@ -7,8 +7,9 @@
 #   pattern     boot with `msm.hold=inf`: the colour test pattern in the screendump (blocks, labels, frame, the diagonals),
 #               and again with `msm.fmt=rgbx`: red and blue swapped, as qemu reads the buffer B,G,R
 #   console     the boot log on the screen after the pattern, the green band, the counter on the last line moving
-#   crashes     `msm.crashtest=abort` (a data abort), `panic` and `early` (a panic before the console): the crash
-#               screens, with the text in the screendump
+#   crashes     `msm.crashtest=abort` (a data abort), `panic`, `early` (a panic before the console) and `pre` (a panic
+#               before memory is set up, text drawn straight into the framebuffer): the crash screens, with the text in the
+#               screendump or the framebuffer's memory
 #   relocation  the same image entered 1 MiB above and 448 KiB below the address it is linked for, and 128 KiB above
 #               and below it so that the old and the new place overlap (the Image header says another text_offset):
 #               boot.S moves it, the tree with it, and the boot goes on
@@ -123,6 +124,17 @@ wait_for 'KERNEL PANIC' 60 && ok "early panic printed" || bad "no early panic ($
 sleep 1; shot early; stop
 verify red "$T/early.ppm" 0 1920 40
 verify text "$T/early.ppm" 0 700 2000
+
+# A crash before memory is set up: the log is drawn glyph by glyph into the framebuffer the tree names.
+boot pre virt "msm.hold=0 msm.crashtest=pre" -dtb "$T/phone.dtb" -device ramfb
+wait_for 'KERNEL PANIC' 60 && ok "pre-memory panic printed" || bad "no pre-memory panic ($LOG)"
+sleep 0.5
+words="$(python3 scripts/qmp.py "$SOCK" hmp "xp /1080wx $(( 0x50000000 + 20*4320 ))" | grep -Eao '0x[0-9a-f]{8}')"
+n=$(echo "$words" | grep -c '0xffece6d8' || true)
+[ "$n" -gt 20 ] && ok "text pixels drawn straight into the framebuffer ($n light words in one row)" || bad "no text in the framebuffer row ($n)"
+echo "$words" | grep -q '0xff161513' && ok "background cleared" || bad "background not drawn"
+has 'mem: RAM' && bad "memory was already set up" || ok "crashed before mem::init"
+stop
 
 # ---- relocation ----
 for r in up:0x40180000 down:0x40010000 upnear:0x400a0000 downnear:0x40060000; do

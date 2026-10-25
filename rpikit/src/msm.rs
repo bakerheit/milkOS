@@ -42,6 +42,9 @@ pub enum CrashTest {
     Abort,
     /// A panic after the colour pattern, before the console exists: the crash screen builds one.
     Early,
+    /// A panic right after the pattern, before memory is set up: the crash screen draws the log straight into
+    /// the framebuffer, with no allocation.
+    Pre,
 }
 
 /// The `msm.<name>=` options of the kernel command line (docs/pixel2.md). Anything wrong is
@@ -187,7 +190,8 @@ impl Opts {
                 b"panic" => o.crashtest = Some(CrashTest::Panic),
                 b"abort" => o.crashtest = Some(CrashTest::Abort),
                 b"early" => o.crashtest = Some(CrashTest::Early),
-                _ => warn("msm.crashtest: want panic, abort or early"),
+                b"pre" => o.crashtest = Some(CrashTest::Pre),
+                _ => warn("msm.crashtest: want panic, abort, early or pre"),
             }
         }
         (o, w, n)
@@ -555,6 +559,72 @@ pub fn mpidr_affinity(mpidr: u64) -> u32 {
     (((mpidr >> 32) & 0xff) << 24) as u32 | (mpidr & 0xff_ffff) as u32
 }
 
+// ---- what the display controller was told to scan out ------------------------------------
+
+/// The registers of a source pipe (SSPP) of the legacy MDSS display controller, offsets from the pipe
+/// (the same as Linux's mdp5 driver names them); read, never written, to learn what the bootloader set up.
+pub mod sspp {
+    pub const SRC_SIZE: usize = 0x00;
+    pub const OUT_SIZE: usize = 0x0c;
+    pub const SRC0_ADDR: usize = 0x14;
+    pub const SRC_YSTRIDE0: usize = 0x24;
+    pub const SRC_FORMAT: usize = 0x30;
+    pub const SRC_UNPACK: usize = 0x34;
+    /// Highest register read, plus one word.
+    pub const END: usize = 0x38;
+}
+
+/// What `SSPP_SRC_FORMAT` says about the pixels.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SrcFormat {
+    /// Bits per component (G, B, R, A).
+    pub bits: [u8; 4],
+    /// Bytes per pixel in memory.
+    pub bytes: u8,
+    pub alpha: bool,
+    /// Components stored per pixel (1 to 4).
+    pub count: u8,
+    pub tight: bool,
+}
+
+pub fn decode_src_format(v: u32) -> SrcFormat {
+    // The controller's codes: 0 = 4 bits, 1 = 5, 2 = 6, 3 = 8.
+    let bits = |at: u32| [4, 5, 6, 8][((v >> at) & 3) as usize];
+    SrcFormat {
+        bits: [bits(0), bits(2), bits(4), bits(6)],
+        alpha: v & (1 << 8) != 0,
+        bytes: 1 + ((v >> 9) & 3) as u8,
+        count: 1 + ((v >> 12) & 3) as u8,
+        tight: v & (1 << 17) != 0,
+    }
+}
+
+/// The component stored in byte `i` of a pixel, from `SSPP_SRC_UNPACK_PATTERN` (one byte per element,
+/// element 0 in the low byte): `G`, `B`, `R` or `A` (the controller's codes 0 to 3, C0_G_Y to C3_ALPHA).
+pub fn unpack_component(v: u32, i: usize) -> char {
+    ['G', 'B', 'R', 'A'][((v >> (8 * i.min(3))) & 3) as usize]
+}
+
+/// The `msm.fmt=` value that matches the pipe's own format, if there is one: a 4-byte pixel of 8-bit
+/// components, or a 3-byte one. Only a hint: it takes element 0 to be the first byte in memory.
+pub fn suggest_fmt(format: u32, unpack: u32) -> Option<Fmt> {
+    let f = decode_src_format(format);
+    let order = |n: usize| (0..n).map(|i| unpack_component(unpack, i));
+    let mut o = ['?'; 4];
+    for (i, c) in order(f.count as usize).enumerate() {
+        o[i] = c;
+    }
+    match (f.bytes, f.count, f.bits, o) {
+        (4, 4, [8, 8, 8, 8], ['B', 'G', 'R', 'A']) => Some(Fmt::Bgrx),
+        (4, 4, [8, 8, 8, 8], ['R', 'G', 'B', 'A']) => Some(Fmt::Rgbx),
+        (4, 4, [8, 8, 8, 8], ['A', 'R', 'G', 'B']) => Some(Fmt::Xrgb),
+        (4, 4, [8, 8, 8, 8], ['A', 'B', 'G', 'R']) => Some(Fmt::Xbgr),
+        (3, 3, [8, 8, 8, _], ['R', 'G', 'B', _]) => Some(Fmt::Rgb888),
+        (3, 3, [8, 8, 8, _], ['B', 'G', 'R', _]) => Some(Fmt::Bgr888),
+        _ => None,
+    }
+}
+
 // ---- the watchdog ----------------------------------------------------------------------
 
 /// The registers of the Snapdragon's non-secure watchdog (`qcom,msm-watchdog`), from its offsets in
@@ -620,6 +690,7 @@ mod tests {
         assert_eq!(Opts::parse(b"msm.crashtest=abort").0.crashtest, Some(CrashTest::Abort));
         assert_eq!(Opts::parse(b"msm.crashtest=early").0.crashtest, Some(CrashTest::Early));
         assert_eq!(Opts::parse(b"msm.crashtest=panic").0.crashtest, Some(CrashTest::Panic));
+        assert_eq!(Opts::parse(b"msm.crashtest=pre").0.crashtest, Some(CrashTest::Pre));
         assert_eq!(Opts::parse(b"msm.crashtest=boom").2, 1);
         let (o, _, _) = Opts::parse(b"msm.fb=0x9d600000 msm.hold=0");
         assert_eq!(o.fb, Some((0x9d60_0000, 0)));
@@ -632,6 +703,33 @@ mod tests {
         // More warnings than room are dropped quietly.
         let (_, _, n) = Opts::parse(b"msm.fmt=a msm.stride=a msm.size=a msm.fb=a msm.hold=a msm.scale=a msm.kick=a msm.psci=a");
         assert_eq!(n, MAX_WARNINGS);
+    }
+
+    #[test]
+    fn source_pipe_registers_decode() {
+        // 8 bits per component, alpha, 4 bytes per pixel, 4 components stored, tight.
+        let f = decode_src_format(0x0002_3000 | 0x0000_0100 | 0x0000_0600 | 0xff);
+        assert_eq!(f.bits, [8, 8, 8, 8]);
+        assert_eq!((f.bytes, f.count, f.alpha, f.tight), (4, 4, true, true));
+        // RGB565: 5/6/5 bits (G 6, B 5, R 5), 2 bytes, 3 components, no alpha.
+        let f = decode_src_format(0b01_01_10 | (1 << 9) | (2 << 12));
+        assert_eq!((f.bits[0], f.bits[1], f.bits[2]), (6, 5, 5));
+        assert_eq!((f.bytes, f.count, f.alpha), (2, 3, false));
+        // Components by byte: element 0 in the low byte.
+        let u = 0x03_02_00_01; // B G R A from byte 0 up (1 = B, 0 = G, 2 = R, 3 = A)
+        assert_eq!([0, 1, 2, 3].map(|i| unpack_component(u, i)), ['B', 'G', 'R', 'A']);
+        let all8 = 0xff | (3 << 9) | (3 << 12) | (1 << 17) | (1 << 8);
+        assert_eq!(suggest_fmt(all8, u), Some(Fmt::Bgrx));
+        assert_eq!(suggest_fmt(all8, 0x03_01_00_02), Some(Fmt::Rgbx));
+        assert_eq!(suggest_fmt(all8, 0x01_00_02_03), Some(Fmt::Xrgb));
+        assert_eq!(suggest_fmt(all8, 0x02_00_01_03), Some(Fmt::Xbgr));
+        assert_eq!(suggest_fmt(all8, 0x00_00_00_00), None);
+        // 24 bits: R G B.
+        let rgb24 = 0xff | (2 << 9) | (2 << 12) | (1 << 17);
+        assert_eq!(suggest_fmt(rgb24, 0x01_00_02), Some(Fmt::Rgb888));
+        assert_eq!(suggest_fmt(rgb24, 0x02_00_01), Some(Fmt::Bgr888));
+        // Not a 4-byte or 3-byte 8-bit format.
+        assert_eq!(suggest_fmt(0, 0), None);
     }
 
     #[test]

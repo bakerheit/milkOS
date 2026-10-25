@@ -114,7 +114,7 @@ The same kernel with other command lines (the images `build` writes; or `--add-c
 | `msm.mdp=dump` | read (never write) the control path and interface registers, log them |
 | `msm.wdt=pet` | pet the watchdog (one register write) once a second |
 | `msm.psci=1` | ask PSCI for its version (one `smc`) |
-| `msm.crashtest=panic` / `abort` / `early` | stop on purpose, to look at the crash screen: a panic, a data abort, a panic before the console exists |
+| `msm.crashtest=panic` / `abort` / `early` / `pre` | stop on purpose, to look at the crash screen: a panic, a data abort, a panic before the console exists, a panic before memory is set up (the log is then drawn glyph by glyph straight into the framebuffer) |
 
 A value that is wrong is logged (`option: msm.fmt: not one of ...`) and the default is used.
 
@@ -140,7 +140,9 @@ The colour pattern is written into the bootloader's framebuffer in RAM. Three th
 2. **The panel needs a refresh** (a command-mode panel only shows a frame when the display controller is told to send one; the bootloader's own picture stays, ours never appears). The `-kick` image writes 1 to `CTL_START` of control path 0 (`0xc90_0000` plus
    `qcom,mdss-ctl-off[0]` = `0x2000`, register `0x1c`, from the tree's `qcom,mdss_mdp` node), ten times a second, after logging `TOP` and `FLUSH`. **It writes a register of the display controller**, so read this first: the registers are those of the legacy MDSS driver
    (`CTL_TOP 0x14`, `CTL_FLUSH 0x18`, `CTL_START 0x1c`), written from memory of that driver, not from a manual; which control path drives the panel is a guess (the `-mdp` image reads the four interfaces' timing engine and frame counter, and each control path's `TOP` and `FLUSH`: a counter
-   that moves between its two readings means a video-mode panel that needs no kick, a `TOP` that names an interface says which path is live). The sensible order is `-mdp` first (read only), then `-kick` with the control path it points at (`msm.kick=ctlN`).
+   that moves between its two readings means a video-mode panel that needs no kick, a `TOP` that names an interface says which path is live).
+   It also reads the source pipes the bootloader set up (`SRC0_ADDR`, `SRC_SIZE`, `OUT_SIZE`, `SRC_YSTRIDE0`, `SRC_FORMAT`, `SRC_UNPACK_PATTERN`, the register layout of Linux's mdp5 driver) and logs, for each pipe that has an address, **where it scans out, how long its rows are and
+   in what byte order**: the real answer to the pixel order and row length questions, with a suggested `msm.fmt=` and `msm.stride=`. (The component codes are 0 = G, 1 = B, 2 = R, 3 = A and element 0 is taken to be the first byte in memory; compare with what the pattern shows.) The sensible order is `-mdp` first (read only), then `-kick` with the control path it points at (`msm.kick=ctlN`).
 3. **The display is off** when the kernel starts (the bootloader switched it off at the hand-over; the splash only continues if it said so in the tree, node `qcom,mdss_fb_primary`, `qcom,cont-splash-memory`). Then there is nothing to draw on until a display driver brings up the DSI link and the panel from scratch
    (the DSI PHY and PLL, the controller, the panel's own init sequence, which is vendor specific and not known here). That is the next big piece of work and needs the owner's input on how far to go; until then **the only record is whatever else survives**: the RAM log region
    (`ramoops`, below) and the phone's own behaviour (a reset after 15 to 30 s is the watchdog, see above).

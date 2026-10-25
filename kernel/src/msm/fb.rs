@@ -262,7 +262,13 @@ pub fn crash_screen(tail: usize) -> bool {
         sink::flush_screen();
         return true;
     }
-    let Some(mut c) = console() else { return false };
+    // Before the allocator exists (a crash while memory is being set up) or when it has no room for
+    // the console's RAM copy: the text goes straight into the framebuffer.
+    let console = if crate::pmm::is_ready() { console() } else { None };
+    let Some(mut c) = console else {
+        direct_text(tail);
+        return true;
+    };
     crate::klog::tail(tail, |bytes| {
         for chunk in bytes.utf8_chunks() {
             c.write_str(chunk.valid());
@@ -271,6 +277,107 @@ pub fn crash_screen(tail: usize) -> bool {
     c.write_str("\n\x1b[1;31mmilkOS stopped.\x1b[0m Photograph this screen.\n");
     c.flush();
     true
+}
+
+/// Where the glyphs of `direct_text` go: walks the log's characters, wrapping at `cols`, skipping the
+/// colour codes, and calls `emit(line, column, byte)` for every printable one.
+struct Walk {
+    cols: usize,
+    line: usize,
+    col: usize,
+    esc: u8,
+}
+
+impl Walk {
+    fn new(cols: usize) -> Walk {
+        Walk { cols, line: 0, col: 0, esc: 0 }
+    }
+    fn feed(&mut self, c: u8, mut emit: impl FnMut(usize, usize, u8)) {
+        match self.esc {
+            1 => {
+                self.esc = if c == b'[' { 2 } else { 0 };
+                return;
+            }
+            2 => {
+                if (0x40..=0x7e).contains(&c) {
+                    self.esc = 0;
+                }
+                return;
+            }
+            _ => {}
+        }
+        match c {
+            0x1b => self.esc = 1,
+            b'\n' => {
+                self.line += 1;
+                self.col = 0;
+            }
+            b'\t' => self.col = (self.col + 8) & !7,
+            0x20..=0x7e => {
+                if self.col >= self.cols {
+                    self.line += 1;
+                    self.col = 0;
+                }
+                emit(self.line, self.col, c);
+                self.col += 1;
+            }
+            _ => {}
+        }
+    }
+    fn lines(&self) -> usize {
+        self.line + (self.col > 0) as usize
+    }
+}
+
+/// The end of the log drawn glyph by glyph straight into the framebuffer, in the guessed pixel
+/// order: no allocation, no console, for a crash before memory is up. Slow and plain.
+fn direct_text(tail: usize) {
+    const FOOTER: &[u8] = b"\nmilkOS stopped. Photograph this screen.\n";
+    let Some(g) = geometry() else { return };
+    let scale = SCALE.load(Ordering::Acquire).max(1);
+    let (cw, ch) = (font::GLYPH_W * scale, font::GLYPH_H * scale);
+    let cols = (g.width.saturating_sub(16) / cw).max(1);
+    let rows = (g.height.saturating_sub(16) / ch).max(1);
+    let bpp = g.fmt.bytes();
+    let dst = bytes();
+    for y in 0..g.height {
+        for x in 0..g.width {
+            let at = y * g.stride + x * bpp;
+            if at + bpp <= dst.len() {
+                g.fmt.put(&mut dst[at..], crate::fbcon::DEFAULT_BG);
+            }
+        }
+    }
+    let mut count = Walk::new(cols);
+    crate::klog::tail(tail, |b| b.iter().for_each(|&c| count.feed(c, |_, _, _| {})));
+    FOOTER.iter().for_each(|&c| count.feed(c, |_, _, _| {}));
+    let skip = count.lines().saturating_sub(rows);
+    let mut draw = Walk::new(cols);
+    let mut put = |line: usize, col: usize, c: u8| {
+        if line < skip || line - skip >= rows {
+            return;
+        }
+        let (x0, y0) = (8 + col * cw, 8 + (line - skip) * ch);
+        for (r, bits) in font::glyph(c as char).iter().enumerate() {
+            for b in 0..font::GLYPH_W {
+                if bits & (0x80 >> b) == 0 {
+                    continue;
+                }
+                for dy in 0..scale {
+                    for dx in 0..scale {
+                        let (x, y) = (x0 + b * scale + dx, y0 + r * scale + dy);
+                        let at = y * g.stride + x * bpp;
+                        if x < g.width && y < g.height && at + bpp <= dst.len() {
+                            g.fmt.put(&mut dst[at..], crate::fbcon::DEFAULT_FG);
+                        }
+                    }
+                }
+            }
+        }
+    };
+    crate::klog::tail(tail, |b| b.iter().for_each(|&c| draw.feed(c, &mut put)));
+    FOOTER.iter().for_each(|&c| draw.feed(c, &mut put));
+    clean(0, g.bytes_needed().min(dst.len()));
 }
 
 // ---- the refresh kick -------------------------------------------------------------------
@@ -370,6 +477,55 @@ pub fn mdp_dump(d: &Dtb, freq: u64) {
         frames[n] = (a, rd(a + 0xac));
         n += 1;
     }
+    // The source pipes: what the bootloader told the controller to scan out, which is the real answer to
+    // "where is the picture, how long are its rows, in what order are its bytes".
+    let (region_pa, region_size) = region();
+    let mut idle = 0;
+    for (name, prop) in [("vig", &b"qcom,mdss-pipe-vig-off"[..]), ("dma", &b"qcom,mdss-pipe-dma-off"[..])] {
+        for i in 0..4 {
+            let Some(off) = mdp_off(d, prop, i) else { break };
+            if off + msm::sspp::END > reg[0].1 as usize {
+                continue;
+            }
+            let a = base + off;
+            let addr = rd(a + msm::sspp::SRC0_ADDR);
+            if addr == 0 {
+                idle += 1;
+                continue;
+            }
+            let (size, out, stride) = (rd(a + msm::sspp::SRC_SIZE), rd(a + msm::sspp::OUT_SIZE), rd(a + msm::sspp::SRC_YSTRIDE0));
+            let (format, unpack) = (rd(a + msm::sspp::SRC_FORMAT), rd(a + msm::sspp::SRC_UNPACK));
+            kprintln!(
+                "mdp: {name}{i} +{off:#x}: scans out {addr:#x}, source {}x{}, output {}x{}, row {} bytes",
+                size & 0xffff,
+                size >> 16,
+                out & 0xffff,
+                out >> 16,
+                stride & 0xffff
+            );
+            let f = msm::decode_src_format(format);
+            kprintln!(
+                "mdp: {name}{i}: FORMAT {format:#x} UNPACK {unpack:#x}: {} bytes a pixel, {}{}{}{} bits, byte order {}{}{}{}",
+                f.bytes,
+                f.bits[2],
+                f.bits[0],
+                f.bits[1],
+                if f.alpha { f.bits[3] } else { 0 },
+                msm::unpack_component(unpack, 0),
+                msm::unpack_component(unpack, 1),
+                msm::unpack_component(unpack, 2),
+                msm::unpack_component(unpack, 3)
+            );
+            let a = addr as usize;
+            if a >= region_pa && a < region_pa + region_size {
+                kprintln!("mdp: {name}{i}: inside the framebuffer region, +{:#x}", a - region_pa);
+            }
+            if let Some(fmt) = msm::suggest_fmt(format, unpack) {
+                kprintln!("mdp: {name}{i}: suggests msm.fmt={} msm.stride={}", fmt.name(), stride & 0xffff);
+            }
+        }
+    }
+    kprintln!("mdp: {idle} source pipes have no address (idle)");
     let t = crate::timer::counter() + freq / 10;
     while crate::timer::counter() < t {
         core::hint::spin_loop();

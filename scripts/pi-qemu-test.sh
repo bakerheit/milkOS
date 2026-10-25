@@ -54,7 +54,7 @@ else
   scripts/pi-build.sh "$T/kernel8.img" >/dev/null
 fi
 # What qemu does not supply: a device tree (qemu's raspi4b has none of its own).
-python3 scripts/pi_dtb.py "$T/pi.dtb" --cmdline "milk.sdwrite=1"
+python3 scripts/pi_dtb.py "$T/pi.dtb" --cmdline "milk.sdwrite=1 milk.genet=probe"
 python3 scripts/mkmilkfs.py mkfs "$T/sd.img" --size 64M --label Milk >/dev/null
 # boot 3's tree: no CPUs (it must fit under the boot stub's own code at 0x300), two banks.
 python3 scripts/pi_dtb.py "$T/banks.dtb" --cpus 0 --ram-bytes 0x3b400000 --bank 0x40000000:0x40000000 --cmdline "milk.ledcodes=0"
@@ -140,6 +140,9 @@ check '^\[sdhci\] .*card ready' "the SD card"
 check '^milkfs: mmcblk0 mounted at /Volumes/Milk' "milkfs on the SD card"
 check '^milklog: not writing a log file: no partition table' "the log writer leaves a milkfs card alone (no FAT, no log file)"
 check 'wm: desktop up' "the desktop"
+check '^\[genet\] no Ethernet controller in the device tree' "milk.genet=probe on a board without GENET: the driver skips cleanly"
+check '^\[genet\] milk.genet is set but there is nothing to probe: skipped' "milk.genet=probe: said so, nothing probed"
+has '^\[genet\] probe step|SError' && bad "milk.genet=probe ran a step or took an SError on qemu" || ok "milk.genet=probe: no step ran, no SError"
 [ "$(led_lines)" = "$LED_ORDER" ] && ok "LED codes: the milestones in order ($(led_lines))" || bad "LED codes: wrong stages: $(led_lines)"
 PIN=$(cat "$T/pin1")
 echo "$PIN" | grep -Eq '10+1' && ok "LED pin: high, dark (the start marker and the codes), high again (solid on)" || bad "LED pin never did high-dark-high: ${PIN:0:80}..."

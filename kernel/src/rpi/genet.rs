@@ -31,106 +31,7 @@ const BASE: usize = phys_to_virt(GENET_PHYS);
 /// INTRL2_0's interrupt: SPI 157.
 const IRQ: u32 = 32 + 157;
 
-// Blocks.
-const SYS: usize = 0x0000;
-const EXT: usize = 0x0080;
-const INTRL2_0: usize = 0x0200;
-const RBUF: usize = 0x0300;
-const UMAC: usize = 0x0800;
-const RDMA: usize = 0x2000;
-const TDMA: usize = 0x4000;
-
-// SYS.
-const SYS_REV_CTRL: usize = SYS;
-const SYS_PORT_CTRL: usize = SYS + 0x04;
-const SYS_RBUF_FLUSH_CTRL: usize = SYS + 0x08;
-const SYS_TBUF_FLUSH_CTRL: usize = SYS + 0x0c;
-const PORT_MODE_EXT_GPHY: u32 = 3;
-// EXT.
-const EXT_PWR_MGMT: usize = EXT;
-const EXT_PWR_DOWN_BIAS: u32 = 1 << 0;
-const EXT_PWR_DOWN_DLL: u32 = 1 << 1;
-const EXT_PWR_DOWN_PHY: u32 = 1 << 2;
-const EXT_RGMII_OOB_CTRL: usize = EXT + 0x0c;
-const RGMII_LINK: u32 = 1 << 4;
-const OOB_DISABLE: u32 = 1 << 5;
-const RGMII_MODE_EN: u32 = 1 << 6;
-const ID_MODE_DIS: u32 = 1 << 16;
-// INTRL2_0.
-const INTRL2_STAT: usize = INTRL2_0;
-const INTRL2_CLEAR: usize = INTRL2_0 + 0x08;
-const INTRL2_MASK_STATUS: usize = INTRL2_0 + 0x0c;
-const INTRL2_MASK_SET: usize = INTRL2_0 + 0x10;
-const INTRL2_MASK_CLEAR: usize = INTRL2_0 + 0x14;
-const IRQ_RXDMA_DONE: u32 = 7 << 13; // MBDONE | PDONE | BDONE
-// RBUF.
-const RBUF_CTRL: usize = RBUF;
-const RBUF_CHK_CTRL: usize = RBUF + 0x14;
-const RBUF_TBUF_SIZE_CTRL: usize = RBUF + 0xb4;
-const TBUF_CTRL: usize = 0x0600;
-// UMAC.
-const UMAC_CMD: usize = UMAC + 0x008;
-const UMAC_MAC0: usize = UMAC + 0x00c;
-const UMAC_MAC1: usize = UMAC + 0x010;
-const UMAC_MAX_FRAME_LEN: usize = UMAC + 0x014;
-const UMAC_TX_FLUSH: usize = UMAC + 0x334;
-const UMAC_MIB_CTRL: usize = UMAC + 0x580;
-const UMAC_MDIO_CMD: usize = UMAC + 0x614;
-const CMD_TX_EN: u32 = 1 << 0;
-const CMD_RX_EN: u32 = 1 << 1;
-const CMD_SPEED_SHIFT: u32 = 2;
-const CMD_PROMISC: u32 = 1 << 4;
-const CMD_PAD_EN: u32 = 1 << 5;
-const CMD_RX_PAUSE_IGNORE: u32 = 1 << 8;
-const CMD_HD_EN: u32 = 1 << 10;
-const CMD_SW_RESET: u32 = 1 << 13;
-const CMD_LCL_LOOP_EN: u32 = 1 << 15;
-const CMD_TX_PAUSE_IGNORE: u32 = 1 << 28;
-const MDIO_START_BUSY: u32 = 1 << 29;
-const MDIO_READ_FAIL: u32 = 1 << 28;
-const MDIO_RD: u32 = 2 << 26;
-const MDIO_WR: u32 = 1 << 26;
-
-// DMA: descriptors first (256 x 12 bytes), then the ring registers (0x40 each, 17 rings), then the
-// engine's global registers.
-const TOTAL_DESC: usize = 256;
-const DESC_SIZE: usize = 12;
-const RING_SIZE_BYTES: usize = 0x40;
-const DEFAULT_RING: usize = 16;
-const RINGS_SIZE: usize = RING_SIZE_BYTES * (DEFAULT_RING + 1);
-const DESC_BYTES: usize = TOTAL_DESC * DESC_SIZE;
-const fn ring_reg(dma: usize, off: usize) -> usize {
-    dma + DESC_BYTES + RING_SIZE_BYTES * DEFAULT_RING + off
-}
-const fn dma_reg(dma: usize, off: usize) -> usize {
-    dma + DESC_BYTES + RINGS_SIZE + off
-}
-// Ring registers (TX names; RX uses the same offsets for its counterparts).
-const R_READ_PTR: usize = 0x00; // TX read pointer / RX write pointer
-const R_CONS_INDEX: usize = 0x08; // TX consumer / RX producer (written by hardware)
-const R_PROD_INDEX: usize = 0x0c; // TX producer / RX consumer (written by software)
-const R_BUF_SIZE: usize = 0x10;
-const R_START_ADDR: usize = 0x14;
-const R_END_ADDR: usize = 0x1c;
-const R_MBUF_DONE_THRESH: usize = 0x24;
-const R_FLOW_PERIOD: usize = 0x28; // TX flow period / RX xon-xoff threshold
-const R_WRITE_PTR: usize = 0x2c; // TX write pointer / RX read pointer
-// DMA engine registers.
-const D_RING_CFG: usize = 0x00;
-const D_CTRL: usize = 0x04;
-const D_SCB_BURST_SIZE: usize = 0x0c;
-const DMA_EN: u32 = 1 << 0;
-const DMA_RING_BUF_EN_SHIFT: u32 = 1;
-const DMA_MAX_BURST_LENGTH: u32 = 0x10;
-// Descriptor words.
-const BD_LENGTH_STATUS: usize = 0;
-const BD_ADDR_LO: usize = 4;
-const BD_ADDR_HI: usize = 8;
-
-const RING_SIZE: usize = 64;
-const BUF_SIZE: usize = 2048;
-/// Largest Ethernet frame we send or expect (no FCS, no VLAN tag).
-const MAX_FRAME: usize = 1514;
+use rpikit::genet::regs::*;
 
 // MII registers and bits.
 const MII_BMCR: u8 = 0;
@@ -447,77 +348,115 @@ impl Genet {
     }
 }
 
-fn init_rings(rx: &Buffer) {
-    // Descriptor memory is the controller's own: clear it.
+/// Zero the descriptor memory of both engines (it is the controller's own RAM, with no reset value we can rely on).
+fn clear_descriptors() {
     for i in 0..TOTAL_DESC {
         bd_write(RDMA, i, 0, 0);
         bd_write(TDMA, i, 0, 0);
     }
-    // Receive ring: RING_SIZE buffers posted, indexes at zero.
+}
+
+/// Give the controller its receive buffers.
+fn post_rx_descriptors(rx: &Buffer) {
     for i in 0..RING_SIZE {
-        bd_write(
-            RDMA,
-            i,
-            gk::rx_status(BUF_SIZE),
-            rx.pa() + (i * BUF_SIZE) as u64,
+        bd_write(RDMA, i, gk::rx_status(BUF_SIZE), rx.pa() + (i * BUF_SIZE) as u64);
+    }
+}
+
+/// Why the bring-up stopped.
+struct StepFailed;
+
+/// Runs a table of steps (`rpikit::genet::init`): one access each, and a checkpoint that can catch an SError at the end of
+/// every group (after every step in `milk.genet=probe`). The first SError ends it, with a line that names the group.
+struct Bringup<'a> {
+    probe: bool,
+    mac: [u8; 6],
+    rx: &'a Buffer,
+    /// Steps run so far, over all tables, and how many there are (for the `step N/M` lines).
+    done: usize,
+    total: usize,
+}
+
+impl Bringup<'_> {
+    fn run(&mut self, steps: &[gk::Step]) -> Result<(), StepFailed> {
+        for (i, st) in steps.iter().enumerate() {
+            self.done += 1;
+            let n = self.done;
+            if self.probe {
+                // Before the access: if the board hangs instead of raising an SError, this is the last line on the card.
+                kprintln!("[genet] probe step {n}/{}: {} ({st})", self.total, st.name);
+            }
+            let seen = self.exec(st);
+            let label = if self.probe { Some(st.group_end.unwrap_or(st.name)) } else { st.group_end };
+            if let Some(label) = label
+                && !super::serror_checkpoint_catch(label)
+            {
+                self.report_failure(steps, i, label);
+                return Err(StepFailed);
+            }
+            if self.probe {
+                match seen {
+                    Some(v) => kprintln!("[genet] probe step {n} {} ok (read {v:#010x})", st.name),
+                    None => kprintln!("[genet] probe step {n} {} ok", st.name),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn exec(&mut self, st: &gk::Step) -> Option<u32> {
+        match st.op {
+            gk::Op::Read => return Some(rd(st.reg)),
+            gk::Op::Write(v) => wr(st.reg, v),
+            gk::Op::Set(b) => {
+                let old = rd(st.reg);
+                wr(st.reg, old | b);
+                return Some(old);
+            }
+            gk::Op::Clear(b) => {
+                let old = rd(st.reg);
+                wr(st.reg, old & !b);
+                return Some(old);
+            }
+            gk::Op::WriteMac0 => wr(st.reg, gk::mac_registers(self.mac).0),
+            gk::Op::WriteMac1 => wr(st.reg, gk::mac_registers(self.mac).1),
+            gk::Op::DelayUs(us) => delay_us(us as u64),
+            gk::Op::ClearDescriptors => clear_descriptors(),
+            gk::Op::PostRxDescriptors => {
+                post_rx_descriptors(self.rx);
+                dma::sync(self.rx.va(), self.rx.len());
+            }
+        }
+        None
+    }
+
+    fn report_failure(&self, steps: &[gk::Step], i: usize, label: &str) {
+        let n = self.done;
+        if self.probe {
+            kprintln!(
+                "[genet] probe step {n}/{} {} FAILED: the SoC answered the access ({}) with an SError (taken at checkpoint '{label}')",
+                self.total,
+                steps[i].name,
+                steps[i]
+            );
+        } else {
+            let g = gk::init::group_of(steps, i);
+            kprintln!(
+                "[genet] an SError was taken at checkpoint '{label}': the SoC refused one of the accesses of steps {}..={} (of {}):",
+                n - (i - g.start),
+                n + (g.end - 1 - i),
+                self.total
+            );
+            for st in &steps[g] {
+                kprintln!("[genet]   {}: {st}", st.name);
+            }
+        }
+        kprintln!(
+            "[genet] skipping the Ethernet controller (milk.genet=probe names the exact access; milk.disable=genet skips the driver)"
         );
     }
-    wr(dma_reg(RDMA, D_SCB_BURST_SIZE), DMA_MAX_BURST_LENGTH);
-    let r = |off| ring_reg(RDMA, off);
-    wr(r(R_CONS_INDEX), 0);
-    wr(r(R_PROD_INDEX), 0);
-    wr(r(R_BUF_SIZE), (RING_SIZE as u32) << 16 | BUF_SIZE as u32);
-    wr(r(R_START_ADDR), 0);
-    wr(r(R_START_ADDR + 4), 0);
-    wr(r(R_END_ADDR), (RING_SIZE * 3 - 1) as u32);
-    wr(r(R_END_ADDR + 4), 0);
-    wr(r(R_MBUF_DONE_THRESH), 1);
-    // Flow control thresholds: pause the sender when 5 descriptors are left, resume at a sixteenth.
-    wr(r(R_FLOW_PERIOD), 5 << 16 | (RING_SIZE as u32 >> 4).max(1));
-    wr(r(R_READ_PTR), 0);
-    wr(r(R_READ_PTR + 4), 0);
-    wr(r(R_WRITE_PTR), 0);
-    wr(r(R_WRITE_PTR + 4), 0);
-    // Transmit ring.
-    wr(dma_reg(TDMA, D_SCB_BURST_SIZE), DMA_MAX_BURST_LENGTH);
-    let t = |off| ring_reg(TDMA, off);
-    wr(t(R_MBUF_DONE_THRESH), 1);
-    wr(t(R_CONS_INDEX), 0);
-    wr(t(R_PROD_INDEX), 0);
-    wr(t(R_FLOW_PERIOD), 0);
-    wr(t(R_BUF_SIZE), (RING_SIZE as u32) << 16 | BUF_SIZE as u32);
-    wr(t(R_START_ADDR), 0);
-    wr(t(R_START_ADDR + 4), 0);
-    wr(t(R_END_ADDR), (RING_SIZE * 3 - 1) as u32);
-    wr(t(R_END_ADDR + 4), 0);
-    wr(t(R_READ_PTR), 0);
-    wr(t(R_READ_PTR + 4), 0);
-    wr(t(R_WRITE_PTR), 0);
-    wr(t(R_WRITE_PTR + 4), 0);
 }
 
-fn dma_enable() {
-    let rings = 1u32 << (DEFAULT_RING as u32 + DMA_RING_BUF_EN_SHIFT);
-    wr(dma_reg(RDMA, D_RING_CFG), 1 << DEFAULT_RING);
-    wr(dma_reg(TDMA, D_RING_CFG), 1 << DEFAULT_RING);
-    wr(
-        dma_reg(RDMA, D_CTRL),
-        rd(dma_reg(RDMA, D_CTRL)) | rings | DMA_EN,
-    );
-    wr(
-        dma_reg(TDMA, D_CTRL),
-        rd(dma_reg(TDMA, D_CTRL)) | rings | DMA_EN,
-    );
-}
-
-fn dma_disable() {
-    let mask = (1u32 << (DEFAULT_RING as u32 + 1 + DMA_RING_BUF_EN_SHIFT)) - 1;
-    wr(dma_reg(TDMA, D_CTRL), rd(dma_reg(TDMA, D_CTRL)) & !mask);
-    wr(dma_reg(RDMA, D_CTRL), rd(dma_reg(RDMA, D_CTRL)) & !mask);
-    wr(UMAC_TX_FLUSH, 1);
-    delay_us(10);
-    wr(UMAC_TX_FLUSH, 0);
-}
 
 fn on_irq(_irq: u32, _frame: &mut crate::exceptions::TrapFrame) {
     let status = rd(INTRL2_STAT) & !rd(INTRL2_MASK_STATUS);
@@ -549,6 +488,9 @@ pub fn init() {
     };
     if dtb.find_prefix(b"ethernet@", b"compatible").is_none() || dtb.node_disabled(b"ethernet@") {
         kprintln!("[genet] no Ethernet controller in the device tree (qemu's raspi4b has none)");
+        if crate::fwcfg::option("genet").is_some() {
+            kprintln!("[genet] milk.genet is set but there is nothing to probe: skipped");
+        }
         return;
     }
     let mac = mac_address(&dtb);
@@ -585,54 +527,28 @@ pub fn init() {
         kprintln!("[genet] the DMA buffers are beyond what the controller can address: not using it");
         return;
     }
+    // Nothing before this point has touched anything but the version register: a pending SError from an earlier driver
+    // is taken here, not blamed on the controller.
     super::serror_checkpoint("genet-buffers");
-    // Power up the MAC's blocks, reset the UMAC and the buffers.
-    wr(
-        EXT_PWR_MGMT,
-        rd(EXT_PWR_MGMT) & !(EXT_PWR_DOWN_BIAS | EXT_PWR_DOWN_DLL | EXT_PWR_DOWN_PHY),
-    );
-    super::serror_checkpoint("genet-power-up");
-    dma_disable();
-    super::serror_checkpoint("genet-dma-off");
-    wr(SYS_RBUF_FLUSH_CTRL, rd(SYS_RBUF_FLUSH_CTRL) | 2);
-    delay_us(10);
-    wr(SYS_RBUF_FLUSH_CTRL, rd(SYS_RBUF_FLUSH_CTRL) & !2);
-    delay_us(10);
-    wr(SYS_TBUF_FLUSH_CTRL, 0);
-    wr(UMAC_CMD, 0);
-    wr(UMAC_CMD, CMD_SW_RESET | CMD_LCL_LOOP_EN);
-    delay_us(2);
-    wr(UMAC_CMD, 0);
-    super::serror_checkpoint("genet-umac-reset");
-    // RGMII to an external PHY; the PHY adds the receive delay, the MAC the transmit delay.
-    wr(SYS_PORT_CTRL, PORT_MODE_EXT_GPHY);
-    wr(
-        EXT_RGMII_OOB_CTRL,
-        (rd(EXT_RGMII_OOB_CTRL) & !(OOB_DISABLE | ID_MODE_DIS | RGMII_LINK)) | RGMII_MODE_EN,
-    );
-    // Addresses, frame size, counters.
-    let (m0, m1) = gk::mac_registers(mac);
-    wr(UMAC_MAC0, m0);
-    wr(UMAC_MAC1, m1);
-    wr(UMAC_MAX_FRAME_LEN, 1536);
-    wr(UMAC_MIB_CTRL, 7);
-    wr(UMAC_MIB_CTRL, 0);
-    // Plain frames: no 64-byte status block either way (Linux turns those on for checksum offload), no
-    // receive checksum, FCS stripped by the MAC (CMD_CRC_FWD off).
-    wr(RBUF_CTRL, 0);
-    wr(TBUF_CTRL, 0);
-    wr(RBUF_CHK_CTRL, 0);
-    wr(RBUF_TBUF_SIZE_CTRL, 1);
-    // Frames to anyone for now (a switch only sends us ours, plus broadcasts): the address filter is
-    // a refinement for later.
-    wr(
-        UMAC_CMD,
-        CMD_PROMISC | CMD_PAD_EN | CMD_RX_PAUSE_IGNORE | CMD_TX_PAUSE_IGNORE,
-    );
-    super::serror_checkpoint("genet-umac-setup");
-    init_rings(&rx_bufs);
-    dma::sync(rx_bufs.va(), rx_bufs.len());
-    super::serror_checkpoint("genet-rings");
+    let mode = match gk::init::Mode::parse(crate::fwcfg::option("genet")) {
+        Ok(m) => m,
+        Err(m) => {
+            kprintln!("[genet] milk.genet must be probe (or absent), running normally");
+            m
+        }
+    };
+    let probe = mode == gk::init::Mode::Probe;
+    let total = gk::init::INIT.len() + gk::init::IRQ_MASK.len() + gk::init::IRQ_UNMASK.len() + gk::init::DMA_ON.len();
+    if probe {
+        kprintln!(
+            "[genet] milk.genet=probe: {total} steps, an SError checkpoint after each; the line `probe step N name ok` is printed once its access did not raise one"
+        );
+    }
+    let mut b = Bringup { probe, mac, rx: &rx_bufs, done: 0, total };
+    // Power, reset, DMA off, MAC and ring set-up: the table's order (rpikit::genet::init::INIT).
+    if b.run(gk::init::INIT).is_err() {
+        return;
+    }
     // The PHY.
     let hint = dtb
         .find_prefix(b"ethernet-phy@", b"reg")
@@ -652,17 +568,25 @@ pub fn init() {
             rd(UMAC_MDIO_CMD)
         ),
     }
-    super::serror_checkpoint("genet-phy");
+    if !super::serror_checkpoint_catch("genet-phy") {
+        kprintln!("[genet] an SError was taken at checkpoint 'genet-phy' (the PHY's MDIO accesses): skipping the Ethernet controller");
+        return;
+    }
     // Interrupt on received frames; DMA on.
-    wr(INTRL2_MASK_SET, 0xffff_ffff);
-    wr(INTRL2_CLEAR, 0xffff_ffff);
+    if b.run(gk::init::IRQ_MASK).is_err() {
+        return;
+    }
     if crate::gic::register(IRQ, on_irq).is_ok() {
         let _ = crate::gic::enable(IRQ);
-        wr(INTRL2_MASK_CLEAR, IRQ_RXDMA_DONE);
+        if b.run(gk::init::IRQ_UNMASK).is_err() {
+            return;
+        }
+    } else {
+        b.done += gk::init::IRQ_UNMASK.len();
     }
-    super::serror_checkpoint("genet-irq");
-    dma_enable();
-    super::serror_checkpoint("genet-dma-on");
+    if b.run(gk::init::DMA_ON).is_err() {
+        return;
+    }
     let dev = Genet {
         mac,
         rx_bufs,

@@ -96,6 +96,10 @@ pub fn init() {
 /// previous one that passed on the same CPU.
 pub use crate::serror::checkpoint as serror_checkpoint;
 
+/// Like [`serror_checkpoint`], but a pending SError is swallowed instead of ending in a crash dump: returns `false` when one was
+/// taken (the access that raised it happened since the previous checkpoint). For a driver that can carry on without its device.
+pub use crate::serror::checkpoint_catch as serror_checkpoint_catch;
+
 pub use crate::timeout::Timeout;
 
 /// Clean and invalidate the data cache over `[va, va+len)`, to the point of coherency: before a

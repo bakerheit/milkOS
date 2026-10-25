@@ -1587,6 +1587,135 @@ mod genet_tests {
             (0xdca6_3212, 0x3456)
         );
     }
+
+    mod init_table {
+        use crate::genet::init::*;
+        use crate::genet::regs::*;
+
+        fn all() -> std::vec::Vec<(&'static str, &'static [Step])> {
+            std::vec![("init", INIT), ("irq-mask", IRQ_MASK), ("irq-unmask", IRQ_UNMASK), ("dma-on", DMA_ON)]
+        }
+
+        fn pos(name: &str) -> usize {
+            INIT.iter().position(|s| s.name == name).unwrap_or_else(|| panic!("no step {name}"))
+        }
+
+        #[test]
+        fn mode_option() {
+            assert_eq!(Mode::parse(None), Ok(Mode::Normal));
+            assert_eq!(Mode::parse(Some(b"probe")), Ok(Mode::Probe));
+            assert_eq!(Mode::parse(Some(b"off")), Ok(Mode::Normal));
+            assert_eq!(Mode::parse(Some(b"proeb")), Err(Mode::Normal), "a typo runs normally but is reported");
+        }
+
+        #[test]
+        fn names_are_unique_and_registers_are_in_the_block() {
+            let mut seen = std::collections::HashSet::new();
+            for (t, steps) in all() {
+                for s in steps {
+                    assert!(seen.insert(s.name), "step name {} twice", s.name);
+                    assert!(!s.name.is_empty() && s.name.len() <= 24, "{}", s.name);
+                    match s.op {
+                        Op::DelayUs(_) => assert_eq!(s.reg, 0, "{t}/{}", s.name),
+                        Op::ClearDescriptors | Op::PostRxDescriptors => {}
+                        _ => {
+                            assert!(s.reg < 0x1_0000 && s.reg % 4 == 0, "{t}/{}: {:#x}", s.name, s.reg);
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn the_umac_and_the_dma_engines_are_out_of_reset_before_they_are_touched() {
+            let release = pos("umac-reset-release");
+            for (i, s) in INIT.iter().enumerate() {
+                let behind_reset = matches!(s.op, Op::Read | Op::Write(_) | Op::Set(_) | Op::Clear(_) | Op::WriteMac0 | Op::WriteMac1)
+                    && ((UMAC..UMAC + 0x1000).contains(&s.reg) || (RDMA..0x6000).contains(&s.reg) || s.reg == TBUF_CTRL || (RBUF + 4..RBUF + 0x100).contains(&s.reg));
+                if behind_reset {
+                    assert!(i > release, "step {} ({}) touches a block before the UMAC reset is released", i + 1, s.name);
+                }
+            }
+            // The release writes the whole register as 0 (not a read-modify-write: the register can come up with the reset bit set).
+            assert_eq!(INIT[release].reg, SYS_RBUF_FLUSH_CTRL);
+            assert_eq!(INIT[release].op, Op::Write(0));
+            assert_eq!(INIT[pos("umac-reset-assert")].op, Op::Write(RBUF_UMAC_SW_RST));
+            // Power first, DMA off before the rings, the rings before DMA on.
+            assert!(pos("ext-power-up") < release);
+            assert!(pos("tdma-off") > pos("umac-cmd-clear") && pos("rdma-off") > pos("umac-cmd-clear"));
+            assert!(pos("clear-descriptors") > pos("umac-cmd-run"));
+            assert!(pos("tx-flush-off") < pos("clear-descriptors"));
+            assert!(pos("post-rx-buffers") > pos("clear-descriptors"));
+        }
+
+        #[test]
+        fn the_values_are_the_ones_the_driver_always_wrote() {
+            let reg = |name| INIT.iter().find(|s| s.name == name).copied().unwrap();
+            assert_eq!(reg("tdma-off").reg, 0x5044);
+            assert_eq!(reg("rdma-off").reg, 0x3044);
+            assert_eq!(reg("tx-flush-on").reg, 0xb34);
+            assert_eq!(reg("ext-power-up").reg, 0x80);
+            assert_eq!(reg("tdma-off").op, Op::Clear(0x3_ffff));
+            assert_eq!(DMA_OFF_MASK, 0x3_ffff);
+            assert_eq!(DMA_ON_BITS, 0x2_0001);
+            assert_eq!(reg("umac-cmd-run").op, Op::Write(UMAC_CMD_RUN));
+            assert_eq!(UMAC_CMD_RUN, 0x1000_0130);
+            assert_eq!(reg("rx-buf-size").op, Op::Write(64 << 16 | 2048));
+            assert_eq!(reg("rx-end-lo").op, Op::Write(191));
+            assert_eq!(reg("rx-flow").op, Op::Write(5 << 16 | 4));
+            assert_eq!(reg("rx-cons-index").reg, 0x3008);
+            assert_eq!(reg("tx-prod-index").reg, 0x500c);
+            assert_eq!(DMA_ON[2].reg, 0x3044);
+            assert_eq!(DMA_ON[3].reg, 0x5044);
+            assert_eq!(IRQ_UNMASK[0].op, Op::Write(7 << 13));
+        }
+
+        #[test]
+        fn groups_end_with_the_checkpoint_labels_in_order() {
+            let labels: std::vec::Vec<_> = INIT.iter().filter_map(|s| s.group_end).collect();
+            assert_eq!(labels, ["genet-power-up", "genet-umac-reset", "genet-dma-off", "genet-umac-setup", "genet-rings"]);
+            assert_eq!(INIT.last().unwrap().group_end, Some("genet-rings"), "the table ends on a checkpoint");
+            assert_eq!(IRQ_MASK.last().unwrap().group_end, Some("genet-irq"));
+            assert_eq!(IRQ_UNMASK.last().unwrap().group_end, Some("genet-irq-on"));
+            assert_eq!(DMA_ON.last().unwrap().group_end, Some("genet-dma-on"));
+            // Every label is in the documented checkpoint table.
+            let doc = include_str!("../../docs/raspberry-pi.md");
+            for (_, steps) in all() {
+                for s in steps.iter().filter_map(|s| s.group_end) {
+                    assert!(doc.contains(&std::format!("`{s}`")), "checkpoint {s} is not in docs/raspberry-pi.md");
+                }
+            }
+        }
+
+        #[test]
+        fn a_group_is_the_steps_since_the_previous_checkpoint() {
+            // The DMA-off group is the two engine control registers and the flush pulse.
+            let g = group_of(INIT, pos("tdma-off"));
+            assert_eq!(INIT[g.start].name, "tdma-off");
+            assert_eq!(INIT[g.end - 1].name, "tx-flush-off");
+            assert_eq!(g, group_of(INIT, pos("tx-flush-off")));
+            // The first group starts at the first step; a one-step table is its own group.
+            assert_eq!(group_of(INIT, 0).start, 0);
+            assert_eq!(INIT[group_of(INIT, 0).end - 1].name, "ext-power-up");
+            assert_eq!(group_of(DMA_ON, 3), 0..4);
+            assert_eq!(group_of(IRQ_UNMASK, 0), 0..1);
+            // Every step is in exactly the group that ends at the next checkpoint.
+            for i in 0..INIT.len() {
+                let g = group_of(INIT, i);
+                assert!(g.contains(&i) && INIT[g.end - 1].group_end.is_some());
+            }
+        }
+
+        #[test]
+        fn steps_print_for_the_log() {
+            let d = |name| std::format!("{}", INIT.iter().find(|s| s.name == name).unwrap());
+            assert_eq!(d("tx-flush-on"), "write genet+0xb34 <- 0x1");
+            assert_eq!(d("tdma-off"), "genet+0x5044 &= !0x3ffff");
+            assert_eq!(d("rgmii-mode-en"), "genet+0x8c |= 0x40");
+            assert_eq!(d("wait-release"), "wait 10 us");
+            assert_eq!(d("ext-pwr-read"), "read genet+0x80");
+        }
+    }
 }
 
 #[test]

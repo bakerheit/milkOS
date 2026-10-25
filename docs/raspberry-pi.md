@@ -76,6 +76,7 @@ them, so every existing option works unchanged:
 | `milk.net="internet=on"` | the launcher's network policy (docs/networking.md) |
 | `milk.sdwrite=1` | allow writes to the SD card (`/dev/mmcblk0` is read-only otherwise: a card that also boots Raspberry Pi OS must not be written by accident; Disk Utility, `disks` and milkfs all see it read-only) |
 | `milk.disable=pcie,usb,genet,sdhci,rng` | start without a driver that misbehaves on a real board (edit `cmdline.txt`, no rebuild): `pcie` (and with it USB), `usb`, `genet`, `sdhci`, `rng` |
+| `milk.genet=probe` | run the Ethernet MAC's bring-up one register access at a time, with an SError checkpoint after each, and log `[genet] probe step N name ok` (or `FAILED`): names the exact access a board refuses (see "GENET bring-up") |
 | `milk.fbscale=N` | magnify the boot log and crash screen font N times (default 1; 2 from 1600 px wide) |
 | `milk.ledcodes=0` | no ACT LED progress codes (the LED just turns on at the start of `kmain`; the `led: stage` log lines stay; the "log saved" signal and the log error blink are off too). Default on; the codes add about 9 s to a boot |
 | `milk.lcd=ili9486` (or `ili9486p`, `ili9486p18`, `ili9488`, `st7796`, `ili9481`, `r61581`, `hx8357`, `ili9341`, `st7789`) | the 3.5-inch SPI display on the GPIO header (off without it; many more options: "3.5-inch SPI display"); `milk.lcd=probe` tries them all |
@@ -273,7 +274,7 @@ are `area-step`. Where they are:
 | `rpi-init-entry` `rpi-mailbox-info` `rpi-rng` `rpi-sdhci` `rpi-genet` `rpi-init-done` | `rpi::init`, between its steps |
 | `mbox-call` | at the end of every mailbox transaction (the firmware wrote into our memory by DMA) |
 | `sdhci-clock` `sdhci-card` | inside the SD driver's init |
-| `genet-buffers` `genet-power-up` `genet-dma-off` `genet-umac-reset` `genet-umac-setup` `genet-rings` `genet-phy` `genet-irq` `genet-dma-on` | the sub-steps of the Ethernet MAC's bring-up, in order |
+| `genet-buffers` `genet-power-up` `genet-umac-reset` `genet-dma-off` `genet-umac-setup` `genet-rings` `genet-phy` `genet-irq` `genet-irq-on` `genet-dma-on` | the sub-steps of the Ethernet MAC's bring-up, in order (the driver catches an SError at all of them but `genet-buffers`: see "GENET bring-up") |
 | `virtio-init` `crypto-init` `irq-enable` `lcd-irqs-live` `memtest` `fs-init` | the rest of the early boot |
 | `sched-init-entry` `sched-init` `smp-init` `audit-journal-sysstat` | around the scheduler, SMP |
 | `smp-cpu-entry` `smp-cpu-up` | on each secondary CPU as it comes up |
@@ -295,7 +296,7 @@ are not recorded (every interrupt and every character would).
 
 **What to do with an SError dump.** (1) Find `SError at checkpoint 'B'` and `after checkpoint 'A'` (or the `where:` line at the
 end). (2) Look at the writes in the list: the culprit is a device access on that CPU between A and B; the last few writes
-name the block. (3) If both labels are in `genet-*`, the Ethernet bring-up is the cause; `milk.disable=genet` starts the board
+name the block. (3) If both labels are in `genet-*`, the Ethernet bring-up is the cause; `milk.genet=probe` names the access, `milk.disable=genet` starts the board
 without it. If it is `tick` after `logfile-flush`, the SD log writes. If the dump says `before any checkpoint passed`,
 the firmware left it. (4) If there are several CPUs in the list of last checkpoints, the one that crashed is the one in the
 vector line (`cpu N`). (5) If `trace` names a driver but not the register, boot once with `milk.serror=paranoid`: every register write of the Pi drivers is then followed by a checkpoint (`mmio-write`), the SError is taken right after the offending write and the dump says `paranoid mode: the bus error came back from the write to genet+0x...`. (6) `milk.serror=off` makes all of this a no-op (one load per call); the cost of a checkpoint is logged at
@@ -829,6 +830,38 @@ in the controller's own memory, MDIO to the BCM54213PE (PHY found at the tree's 
 wait for autonegotiation, program speed/duplex into the MAC, interrupt on received frames (SPI 157) plus a 10 ms
 poll as a safety net. It plugs into the stack as a `net::nic::Nic` next to virtio-net. Promiscuous mode is on for now.
 Not done: the address filter, interrupt-driven transmit completion, checksum offload, flow control tuning, EEE, jumbo frames.
+
+**GENET bring-up** (`rpikit::genet::init` is the step table, `rpi/genet.rs` runs it). The order, each group ending in a checkpoint
+(`genet-power-up`, `genet-umac-reset`, `genet-dma-off`, `genet-umac-setup`, `genet-rings`, then after the PHY `genet-phy`, `genet-irq`,
+`genet-irq-on`, `genet-dma-on`):
+1. power: clear the power-down bits of `EXT_PWR_MGMT` (genet+0x80);
+2. reset: write 0 to `SYS_RBUF_FLUSH_CTRL` (genet+0x08, the whole register: it can come up with its UMAC-reset bit set), pulse bit 1 of it, write 0 to `SYS_TBUF_FLUSH_CTRL`,
+   then `UMAC_CMD` software reset (with local loopback, as the hardware wants), `UMAC_CMD` = 0;
+3. only now the DMA engines and the UMAC: clear the enable bits of `TDMA` / `RDMA` `DMA_CTRL` (genet+0x5044 / 0x3044), pulse `UMAC_TX_FLUSH` (genet+0xb34);
+4. RGMII port mode, MAC address, frame size, counters, `RBUF`/`TBUF` control, `UMAC_CMD`;
+5. the descriptors and ring registers; then the PHY over MDIO; then interrupts masked and cleared, the GIC line, receive interrupts on; then the rings and the DMA engines on.
+
+*What the first real board showed* (Pi 4B rev 1.5): the version register read fine (genet+0x00 = 0x06000000), then an SError was taken at `genet-dma-off`: the
+access that the SoC refused was one of the first accesses to the UMAC / DMA registers (`genet+0x5044`, `0x3044`, `0xb34`; the earlier driver touched them
+before it had released the UMAC from reset, and before the SYS block's reset register was written at all). The SoC answers a register of a block that is held in
+reset or not clocked with an external abort, which arrives asynchronously. The best explanation is that the DMA / UMAC blocks were still in reset (the
+`SYS_RBUF_FLUSH_CTRL` reset bit), which the new order releases first. That is a reading of the symptom, not a verified fix: nothing here could be run on the board.
+
+*The driver now survives a refused access.* The group checkpoints are `serror::checkpoint_catch`: a pending SError is taken there and swallowed (the CPU carries on,
+the board does not halt), and the driver logs `[genet] an SError was taken at checkpoint '...': the SoC refused one of the accesses of steps a..=b (of N)` with the
+steps of the group, then `skipping the Ethernet controller`; the rest of the boot goes on without a network device and no SError is left pending.
+
+*`milk.genet=probe`* (cmdline.txt) puts a checkpoint after **every** access and logs, before it, `[genet] probe step N/M name: <the access>` and after it
+`[genet] probe step N name ok` (with the value for a read or a read-modify-write). A refused write ends with `probe step N name FAILED: ...` and the same skip. A refused
+*read* is usually a synchronous abort instead: the crash dump is then the usual data abort, and the last `probe step N/M ...` line before it names the access. The boot log
+on the card (`MILKLOG.TXT`) has all of it. qemu's raspi4b has no GENET: the option is accepted and the driver says `no Ethernet controller in the device tree` (`pi-qemu-test`).
+`milk.disable=genet` skips the driver without touching the controller at all.
+
+*What to look for in the next real log.* (1) `probe step ... ok` all the way to `genet-dma-on`, then `[genet] PHY at MDIO address 1, id 0x600d84a2` and a `link up` line: the
+reset order was the fix. (2) `probe step N name FAILED`: that register is refused whatever the order; the line before it says which and in what state (the read of `ext-pwr-read`
+shows the power register, the `umac-reset-*` steps the reset bit); the likely next suspects are the clock/power domain of the block (firmware: the GENET clock is not
+in the tree the firmware hands over, so it should be on) and the order of the first access. (3) Everything ok but `no PHY answered on MDIO`: the MAC is fine, the
+problem is the MDIO clock / PHY reset. (4) Link up but no frames: RGMII delays (`ID_MODE_DIS`), the descriptors.
 
 ## What qemu can and cannot test (summary)
 

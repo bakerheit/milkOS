@@ -292,7 +292,11 @@ extern "C" fn exception_entry(frame: &mut TrapFrame, vector: usize) {
             }
         }
         2 => crash(frame, vector, "FIQ (unexpected: we only use IRQ)"),
-        _ => crash(frame, vector, "SError"),
+        _ => {
+            if !crate::serror::swallow(frame, vector) {
+                crash(frame, vector, "SError")
+            }
+        }
     }
     if frame.is_user()
         && let Some(h) = USER_RETURN.get::<UserReturnHook>()

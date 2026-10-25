@@ -3,6 +3,13 @@
 ## Unreleased
 
 **Raspberry Pi 4** (docs/raspberry-pi.md)
+- The Ethernet controller's bring-up no longer crashes the first real board with an SError ("GENET bring-up" in docs/raspberry-pi.md). The real log showed the
+  SoC refusing one of the first accesses to the UMAC / DMA registers: they were touched before the SYS block's reset register was written, so the blocks were
+  most likely still held in reset. The bring-up is now an ordered table (`rpikit::genet::init`, host-tested for its order, values and checkpoint labels): power,
+  release and pulse the UMAC reset, then the UMAC and DMA registers, then the rings. A refused access is tolerated: the group checkpoints swallow the SError
+  (`serror::checkpoint_catch`), the log names the steps it came from, and the controller is skipped while the boot goes on. New `milk.genet=probe` runs every
+  access with its own checkpoint and logs `[genet] probe step N name ok` (or `FAILED`), so the next real run names the exact register if the fix is not enough.
+  Untested on a real board; `pi-qemu-test` boots with the option on raspi4b (no GENET there) and checks it skips cleanly.
 - The 3.5-inch display can no longer hold up the boot or the SD boot log (a `milk.lcd=probe` boot showed "long pulse, one pulse, then nothing" for 100 s
   and the log stayed blank: the probe ran synchronously before everything else). `milk.lcd=probe` now only notes itself at the start of the boot and runs
   last, on its own low-priority thread, once the boot is over (LED solid on, desktop up) and the boot log is saved to the card (or 8 s after the boot is over if

@@ -89,6 +89,9 @@ struct Cpu {
     /// The last checkpoint that passed.
     passed: Label,
     checking: AtomicBool,
+    /// Inside [`checkpoint_catch`]: an SError taken here is swallowed (and noted in `caught`), not a crash.
+    catching: AtomicBool,
+    caught: AtomicBool,
     /// Checkpoints that passed on this CPU.
     count: AtomicU64,
     /// The last [`RING`] register writes: address (virtual), value; `writes` counts them all.
@@ -109,6 +112,8 @@ impl Cpu {
             attempt: Label::new(),
             passed: Label::new(),
             checking: AtomicBool::new(false),
+            catching: AtomicBool::new(false),
+            caught: AtomicBool::new(false),
             count: AtomicU64::new(0),
             addr: [const { AtomicUsize::new(0) }; RING],
             val: [const { AtomicU32::new(0) }; RING],
@@ -200,6 +205,59 @@ pub fn checkpoint(label: &'static str) {
     c.passed.set(label);
     c.count.fetch_add(1, Ordering::Relaxed);
     crate::sync::irq_restore(flags);
+}
+
+/// A checkpoint for a driver that can live without its device: like [`checkpoint`], but a pending SError is taken
+/// and swallowed here (see [`swallow`]) instead of ending in the crash dump. Returns `false` if there was one (or
+/// more: all pending ones are drained), so the driver can log which accesses it did since its previous checkpoint
+/// and give up. Works whatever `milk.serror=` says.
+#[cfg_attr(not(feature = "raspi"), allow(dead_code))]
+#[inline(never)]
+pub fn checkpoint_catch(label: &'static str) -> bool {
+    let flags = crate::sync::irq_save();
+    let c = &CPUS[percpu::id()];
+    let mut clean = true;
+    // A second SError can be pending behind the first (it is taken once the first one's handler is done): go again until quiet.
+    for _ in 0..4 {
+        c.caught.store(false, Ordering::Relaxed);
+        c.catching.store(true, Ordering::Relaxed);
+        // SAFETY: as in `checkpoint`; the vector handler returns here when `catching` is set.
+        unsafe {
+            asm!(
+                "dsb sy",
+                "msr daifclr, #4",
+                "isb",
+                "msr daifset, #4",
+                options(nostack)
+            );
+        }
+        c.catching.store(false, Ordering::Relaxed);
+        if !c.caught.swap(false, Ordering::Relaxed) {
+            break;
+        }
+        clean = false;
+    }
+    if clean {
+        c.passed.set(label);
+        c.count.fetch_add(1, Ordering::Relaxed);
+    }
+    crate::sync::irq_restore(flags);
+    clean
+}
+
+/// The SError vector (current EL) calls this first: if this CPU is inside [`checkpoint_catch`], note it, keep SError masked
+/// on the way back (`frame.spsr`) and return true (no crash).
+pub fn swallow(frame: &mut crate::exceptions::TrapFrame, vector: usize) -> bool {
+    if !(4..8).contains(&vector) {
+        return false;
+    }
+    let c = &CPUS[percpu::id()];
+    if !c.catching.load(Ordering::Relaxed) {
+        return false;
+    }
+    c.caught.store(true, Ordering::Relaxed);
+    frame.spsr |= 1 << 8; // PSTATE.A
+    true
 }
 
 /// Remember a register write on this CPU (virtual address and value), for the dump. Hold the returned guard

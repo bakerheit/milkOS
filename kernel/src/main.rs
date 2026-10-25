@@ -121,6 +121,11 @@ pub extern "C" fn kmain() -> ! {
     kprintln!("milkOS {VERSION} booting...");
     kprintln!("hello from the kernel");
     platform::check_dtb();
+    #[cfg(feature = "raspi")]
+    {
+        rpi::diag::boot_report();
+        rpi::diag::dtb_report();
+    }
 
     gic::init();
     timer::init();
@@ -170,6 +175,9 @@ pub extern "C" fn kmain() -> ! {
     proc::start_init();
     #[cfg(feature = "raspi")]
     rpi::led::stage(rpikit::ledcode::Stage::Userspace, true);
+    // Saves the boot log into the log file on the card, every second or so (rpi/logfile.rs).
+    #[cfg(feature = "raspi")]
+    rpi::logfile::start_thread();
     fs::start_threads();
     #[cfg(feature = "raspi")]
     rpi::lcd::start();

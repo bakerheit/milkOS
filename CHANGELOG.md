@@ -3,6 +3,18 @@
 ## Unreleased
 
 **Raspberry Pi 4** (docs/raspberry-pi.md)
+- The kernel saves its boot log into a file on the SD card, for a board with no serial cable and no working screen: put the blank `MILKLOG.TXT`
+  (`scripts/pi-bootdir.sh` or `scripts/pi-logfile.sh` makes it) on the FAT boot partition, boot, wait for the ACT LED's "log saved" signal (two blinks and a
+  pause), read it on the Mac with `scripts/pi-readlog.sh`. The kernel never creates a file or changes the FAT or a directory: it overwrites the data sectors of
+  that existing file in place, through a narrow SD path of its own (no allocator, usable from the crash handlers, independent of `milk.sdwrite=1`), after
+  proving every sector belongs to the file's cluster chain. FAT32 parsing and the file layout are in `rpikit` (`fat`, `logimg`) with host tests (long-name entries,
+  fragmentation, loops, out-of-range and truncated chains, garbage); the new `pi-log-test` boots generated cards (fragmented file, a crash flush, eight hostile cards
+  left byte for byte untouched) and checks every other sector of the image is unchanged.
+- The boot log now carries what is needed to debug a board remotely: the build, exception level, CPU feature registers, device tree facts, SDHCI/PCIe/USB/GENET/RNG/SPI
+  register values at failures, and every step of the mailbox probe. The mailbox now separates "transport works" (stage 2, decided by a harmless message before any
+  framebuffer is asked for) from "framebuffer allocated" (stage 3), accepts a reply that names our buffer under any bus alias, tries the other aliases if the first is
+  not answered, and fails fast once it is known to be down; the SD controller no longer needs the mailbox for its base clock. Untested on a real board (the
+  first real run decides).
 - A crash on a board with nothing attached is now readable from the ACT LED: instead of fast flashing forever, the LED repeats a cycle
   (ten fast flashes, then counted octal digits, 0 = one long pulse): the boot stage reached, the exception class (or a marker for a Rust
   panic, 77), the faulting PC (12 digits) and the faulting address (8 digits); for a panic the PC group is the source line and the

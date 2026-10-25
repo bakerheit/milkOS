@@ -192,6 +192,21 @@ pub fn transfer(cs: u8, cdiv: u32, tx: &[u8], mut rx: Option<&mut [u8]>) -> bool
             }
         }
     }
+    if !ok && FAILED_LOGGED.fetch_add(1, Ordering::Relaxed) < 4 {
+        crate::kprintln!(
+            "spi: a transfer of {n} bytes on CE{cs} (divider {cdiv}) timed out after {sent} sent and {got} read back: CS {:#x} CLK {:#x}",
+            spi_read(CS),
+            spi_read(CLK)
+        );
+    }
     spi_write(CS, CS_CLEAR_TX | CS_CLEAR_RX);
     ok
+}
+
+/// Failed transfers logged so far (a missing panel would otherwise fill the log).
+static FAILED_LOGGED: AtomicU32 = AtomicU32::new(0);
+
+/// SPI0's CS and CLK registers, for logs.
+pub fn registers() -> (u32, u32) {
+    (spi_read(CS), spi_read(CLK))
 }

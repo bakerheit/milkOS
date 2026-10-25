@@ -21,7 +21,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
 use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use rpikit::sd::{self, Command, Dir, Resp, cmd};
 
@@ -82,6 +82,8 @@ const XFER_HZ: u32 = 25_000_000;
 /// Largest transfer one command carries.
 const MAX_BLOCKS_PER_CMD: usize = 128;
 const SECTOR: usize = 512;
+/// EMMC2's clock on a Pi 4 when the firmware cannot be asked.
+const EMMC2_ASSUMED_HZ: u32 = 200_000_000;
 
 /// Why a command failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +131,46 @@ impl Host {
                 return None;
             }
         }
+    }
+
+    /// Log the registers that say what the controller is doing (for a failure on a board with no
+    /// serial cable: this line is what the boot log file carries).
+    fn dump(&self, why: &str) {
+        kprintln!(
+            "[sdhci] {:#x}: {why}: state {:#010x} int {:#010x} clock {:#010x} hostctl {:#010x} caps {:#010x} version {:#06x} arg {:#010x} resp0 {:#010x}",
+            self.base,
+            self.r32(STATE),
+            self.r32(INT),
+            self.r32(CLOCK),
+            self.r32(HOSTCTL),
+            self.r32(CAPS),
+            self.r32(VERSION) >> 16,
+            self.r32(ARG),
+            self.r32(RESP)
+        );
+    }
+
+    /// Get a controller and card that may have been stopped in the middle of a transfer (a crash)
+    /// back to a state where the next command works: reset the command and data lines and tell the
+    /// card to stop transmitting.
+    fn recover(&self, rca: u32) {
+        let _ = self.reset(RESET_CMD | RESET_DAT);
+        self.clear_interrupts();
+        // Ask the card what it is doing; only a card in the middle of sending or receiving data needs CMD12 (anything
+        // else answers it with "illegal command", which the next command's answer would then report as its own failure).
+        // The second status read takes any such sticky error bit out of the way.
+        for _ in 0..2 {
+            if self
+                .command(&Command::new(cmd::SEND_STATUS, rca, Resp::R48), 0)
+                .is_ok()
+            {
+                let state = (self.r32(RESP) >> 9) & 0xf;
+                if state == 5 || state == 6 {
+                    let _ = self.command(&Command::new(cmd::STOP_TRANSMISSION, 0, Resp::R48Busy), 0);
+                }
+            }
+        }
+        self.clear_interrupts();
     }
 
     /// Software reset of `bits` (RESET_ALL / RESET_CMD / RESET_DAT), waiting for it to finish.
@@ -272,6 +314,8 @@ impl Host {
 struct Card {
     high_capacity: bool,
     blocks: u64,
+    /// The card's relative address, in the position of a command argument (RCA << 16).
+    rca: u32,
 }
 
 /// The caller's buffer for one transfer.
@@ -334,6 +378,123 @@ impl Inner {
     }
 }
 
+/// The controller is in use by one command sequence at a time: the block device holds this for the length of
+/// a transfer, and so does the boot log writer (its narrow path, below). Spinning is fine: nothing holds it
+/// for more than a transfer, and the log writer holds it with interrupts off.
+static HW_BUSY: AtomicBool = AtomicBool::new(false);
+
+struct HwGuard;
+
+impl HwGuard {
+    fn lock() -> HwGuard {
+        while HW_BUSY
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+        HwGuard
+    }
+}
+
+impl Drop for HwGuard {
+    fn drop(&mut self) {
+        HW_BUSY.store(false, Ordering::Release);
+    }
+}
+
+// ---- the boot log writer's narrow path ----------------------------------------------------------
+//
+// `rpi::logfile` (the boot log in a file on the card's FAT partition) reads and writes sectors here, beside the
+// block device: it needs nothing the rest of the kernel provides (no allocator, no scheduler, no VFS, no
+// `milk.sdwrite=1`; that option protects /dev/mmcblk0 from ordinary writes, while this path is only ever asked by
+// the log writer, which proves each sector belongs to its log file before it asks). It works from the crash path,
+// with interrupts off. It exists once a card has been brought up by `init`.
+
+static RAW_BASE: AtomicUsize = AtomicUsize::new(0);
+static RAW_HC: AtomicBool = AtomicBool::new(false);
+static RAW_BLOCKS: AtomicU64 = AtomicU64::new(0);
+static RAW_RCA: AtomicU32 = AtomicU32::new(0);
+
+/// Sectors on the card the log writer can use, if a card was brought up.
+pub fn raw_blocks() -> Option<u64> {
+    (RAW_BASE.load(Ordering::Acquire) != 0).then(|| RAW_BLOCKS.load(Ordering::Relaxed))
+}
+
+/// Read or write `buf` (a whole number of sectors, at most 128) at `lba`. `crash`: the kernel is dying; wait only
+/// briefly for a transfer in progress, then take the controller anyway and put it back in order first.
+/// False on any failure (nothing is retried here).
+fn raw_io(lba: u64, buf: Buf, crash: bool) -> bool {
+    let base = RAW_BASE.load(Ordering::Acquire);
+    let (len, blocks) = match &buf {
+        Buf::Read(b) => (b.len(), RAW_BLOCKS.load(Ordering::Relaxed)),
+        Buf::Write(b) => (b.len(), RAW_BLOCKS.load(Ordering::Relaxed)),
+    };
+    let n = (len / SECTOR) as u64;
+    if base == 0 || len == 0 || !len.is_multiple_of(SECTOR) || n > MAX_BLOCKS_PER_CMD as u64 {
+        return false;
+    }
+    if lba.checked_add(n).is_none_or(|end| end > blocks) {
+        return false;
+    }
+    // Interrupts off while the controller is ours (not in the crash path: they are already).
+    let _irq = crate::sync::IrqGuard::new();
+    let mut stolen = false;
+    let t = Timeout::ms(if crash { 300 } else { 20 });
+    while HW_BUSY
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        if t.expired() {
+            if !crash {
+                return false;
+            }
+            stolen = true;
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    let inner = Inner {
+        host: Host {
+            base,
+            slow: core::cell::Cell::new(false),
+        },
+        card: Card {
+            high_capacity: RAW_HC.load(Ordering::Relaxed),
+            blocks,
+            rca: RAW_RCA.load(Ordering::Relaxed),
+        },
+    };
+    if crash {
+        inner.host.recover(inner.card.rca);
+    }
+    let ok = match inner.rw(lba, buf) {
+        Ok(()) => true,
+        Err(f) => {
+            // The registers at the moment of failure (kprintln! gives up on the print lock after 20 ms, so this
+            // is safe in a crash too).
+            kprintln!("[sdhci] log path{}: lba {lba} x{n} failed: {f:?}", if crash { " (crash)" } else { "" });
+            inner.host.dump("log path");
+            false
+        }
+    };
+    if !stolen {
+        HW_BUSY.store(false, Ordering::Release);
+    }
+    ok
+}
+
+/// Read sectors for the log writer (see above).
+pub fn raw_read(lba: u64, buf: &mut [u8], crash: bool) -> bool {
+    raw_io(lba, Buf::Read(buf), crash)
+}
+
+/// Write sectors for the log writer. Only `rpi::logfile` calls this, and only with sectors it has proved to be
+/// inside the log file's clusters.
+pub fn raw_write(lba: u64, buf: &[u8], crash: bool) -> bool {
+    raw_io(lba, Buf::Write(buf), crash)
+}
+
 /// `/dev/mmcblk0`.
 struct SdCard {
     name: String,
@@ -384,6 +545,7 @@ impl BlockDevice for SdCard {
         self.io[0].fetch_add(1, Ordering::Relaxed);
         self.io[1].fetch_add((buf.len() / SECTOR) as u64, Ordering::Relaxed);
         let d = self.inner.lock();
+        let _hw = HwGuard::lock();
         for (i, chunk) in buf.chunks_mut(MAX_BLOCKS_PER_CMD * SECTOR).enumerate() {
             d.rw(lba + (i * MAX_BLOCKS_PER_CMD) as u64, Buf::Read(chunk))
                 .map_err(errno_for)?;
@@ -399,6 +561,7 @@ impl BlockDevice for SdCard {
         self.io[2].fetch_add(1, Ordering::Relaxed);
         self.io[3].fetch_add((buf.len() / SECTOR) as u64, Ordering::Relaxed);
         let d = self.inner.lock();
+        let _hw = HwGuard::lock();
         for (i, chunk) in buf.chunks(MAX_BLOCKS_PER_CMD * SECTOR).enumerate() {
             d.rw(lba + (i * MAX_BLOCKS_PER_CMD) as u64, Buf::Write(chunk))
                 .map_err(errno_for)?;
@@ -428,6 +591,7 @@ impl BlockDevice for SdCard {
 fn init_card(host: &Host, base_hz: u32) -> Option<Card> {
     if !host.reset(RESET_ALL) {
         kprintln!("[sdhci] {:#x}: reset did not finish", host.base);
+        host.dump("reset");
         return None;
     }
     // Power: 3.3 V. Then the card clock at the identification rate.
@@ -436,18 +600,21 @@ fn init_card(host: &Host, base_hz: u32) -> Option<Card> {
     host.w32(INT_ENABLE, 0x01ff_00ff);
     host.w32(INT_SIGNAL, 0);
     if host.set_clock(base_hz, ID_HZ) == 0 {
-        kprintln!("[sdhci] {:#x}: the clock would not start", host.base);
+        kprintln!("[sdhci] {:#x}: the clock would not start (base {base_hz} Hz)", host.base);
+        host.dump("clock");
         return None;
     }
     crate::timer::delay_ms(2); // power and clock settle before the first command
     // The Pi 4's EMMC2 does not wire card detect (the card-present bit stays 0 with a card in): try
     // regardless. Elsewhere (qemu's older controller) the bit is trustworthy and saves a timeout.
     if host.r32(STATE) & ST_CARD_PRESENT == 0 && host.base != EMMC2 {
+        kprintln!("[sdhci] {:#x}: no card (the card-present bit is clear)", host.base);
         return None;
     }
 
     let fail = |what: &str, f: Fail| -> Option<Card> {
         kprintln!("[sdhci] {:#x}: {what} failed: {f:?}", host.base);
+        host.dump(what);
         None
     };
     if let Err(f) = host.command(&Command::new(cmd::GO_IDLE_STATE, 0, Resp::None), 0) {
@@ -480,9 +647,10 @@ fn init_card(host: &Host, base_hz: u32) -> Option<Card> {
         }
         if t.expired() {
             kprintln!(
-                "[sdhci] {:#x}: the card never finished powering up",
+                "[sdhci] {:#x}: the card never finished powering up (last OCR {ocr:#010x})",
                 host.base
             );
+            host.dump("ACMD41");
             return None;
         }
         crate::timer::delay_ms(5);
@@ -497,6 +665,7 @@ fn init_card(host: &Host, base_hz: u32) -> Option<Card> {
     let (rca, _) = sd::parse_r6(host.r32(RESP));
     if rca == 0 {
         kprintln!("[sdhci] {:#x}: the card gave RCA 0", host.base);
+        host.dump("CMD3");
         return None;
     }
     let rca = (rca as u32) << 16;
@@ -505,6 +674,7 @@ fn init_card(host: &Host, base_hz: u32) -> Option<Card> {
     }
     let Some(csd) = sd::parse_csd(host.response()) else {
         kprintln!("[sdhci] {:#x}: unreadable CSD", host.base);
+        host.dump("CMD9");
         return None;
     };
     if let Err(f) = host.command(&Command::new(cmd::SELECT_CARD, rca, Resp::R48Busy), 0) {
@@ -528,9 +698,10 @@ fn init_card(host: &Host, base_hz: u32) -> Option<Card> {
     host.slow.set(false);
     if hz == 0 {
         kprintln!(
-            "[sdhci] {:#x}: the transfer clock would not start",
+            "[sdhci] {:#x}: the transfer clock would not start (base {base_hz} Hz)",
             host.base
         );
+        host.dump("transfer clock");
         return None;
     }
     kprintln!(
@@ -542,9 +713,16 @@ fn init_card(host: &Host, base_hz: u32) -> Option<Card> {
         if ok4 { 4 } else { 1 },
         hz / 1000
     );
+    kprintln!(
+        "[sdhci] {:#x}: OCR {ocr:#010x}, RCA {:#x}, base clock {base_hz} Hz, ACMD41 argument for {}",
+        host.base,
+        rca >> 16,
+        if v2 { "a version 2 card" } else { "a version 1 card" }
+    );
     Some(Card {
         high_capacity,
         blocks: csd.blocks,
+        rca,
     })
 }
 
@@ -558,17 +736,31 @@ pub fn init() {
         let version = host.r32(VERSION) >> 16;
         // An absent controller reads all ones (or zero); a real one says 0x0002 (spec 3.0) or less.
         if version == 0 || version == 0xffff {
+            kprintln!("[sdhci] {base:#x}: no controller here (version register reads {:#x})", host.r32(VERSION));
             continue;
         }
         let caps = host.r32(CAPS);
-        // The firmware knows the base clock (CAPS is wrong on the BCM2711).
-        let from_fw = if base == EMMC2 {
-            mailbox::clock_rate(rpikit::mailbox::clock::EMMC2).unwrap_or(0)
+        // The firmware knows the base clock (CAPS is wrong on the BCM2711). If the mailbox does not answer, EMMC2 runs from
+        // the 200 MHz clock every Pi 4 firmware sets up for it (the device tree's fixed clock for the controller says the
+        // same), so a dead mailbox does not also cost the board its SD card.
+        let fw = if base == EMMC2 {
+            mailbox::clock_rate(rpikit::mailbox::clock::EMMC2)
         } else {
-            mailbox::clock_rate(rpikit::mailbox::clock::EMMC).unwrap_or(0)
+            mailbox::clock_rate(rpikit::mailbox::clock::EMMC)
         };
+        let from_fw = fw.as_ref().copied().unwrap_or(0);
         let from_caps = ((caps >> 8) & 0xff) * 1_000_000;
-        let base_hz = if from_fw != 0 { from_fw } else { from_caps };
+        let (base_hz, source) = if from_fw != 0 {
+            (from_fw, "firmware")
+        } else if base == EMMC2 {
+            (EMMC2_ASSUMED_HZ, "assumed (the mailbox gave none)")
+        } else {
+            (from_caps, "capabilities register")
+        };
+        kprintln!(
+            "[sdhci] {base:#x}: SDHCI version {:#x}, capabilities {caps:#010x}, base clock {base_hz} Hz ({source}; mailbox said {fw:?})",
+            version
+        );
         if version & 0xff < 1 || base_hz == 0 {
             kprintln!(
                 "[sdhci] {base:#x}: SDHCI version {:#x}, base clock {base_hz} Hz: not usable",
@@ -580,6 +772,11 @@ pub fn init() {
             continue;
         };
         let blocks = card.blocks;
+        // The boot log writer's path (raw_io): from here on it can reach the card.
+        RAW_BLOCKS.store(blocks, Ordering::Relaxed);
+        RAW_HC.store(card.high_capacity, Ordering::Relaxed);
+        RAW_RCA.store(card.rca, Ordering::Relaxed);
+        RAW_BASE.store(base, Ordering::Release);
         let writable = crate::fwcfg::find_file("opt/milkos/sdwrite").is_some_and(|f| {
             let mut b = [0u8; 4];
             f.size as usize <= b.len()

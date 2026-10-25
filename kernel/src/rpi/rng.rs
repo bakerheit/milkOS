@@ -60,11 +60,17 @@ pub fn init() {
         .find_prefix(b"rng@", b"compatible")
         .is_some_and(|c| crate::dtb::compat_has(c, "rng200"));
     if !has || dtb.node_disabled(b"rng@") {
+        kprintln!("[rng] no enabled rng200 node in the device tree");
         return;
     }
     restart();
     PRESENT.store(true, Ordering::Release);
-    kprintln!("[rng] BCM2711 hardware generator started");
+    kprintln!(
+        "[rng] BCM2711 hardware generator started (ctrl {:#x} int status {:#x} fifo count {})",
+        rd(CTRL),
+        rd(INT_STATUS),
+        rd(FIFO_COUNT)
+    );
 }
 
 /// Up to `out.len()` random bytes from the generator, waiting at most `timeout_ns` in total; the

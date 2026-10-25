@@ -7,7 +7,10 @@
 //!   Each burst is played by busy-waiting on the generic counter, so it needs no allocator,
 //!   timer interrupt or scheduler, and adds about 9 s to a whole boot (`milk.ledcodes=0` turns
 //!   the codes off; the `led: stage N name` log lines stay).
-//! * [`finish`]: the boot is done, solid on.
+//! * [`finish`]: the boot is done, solid on. If the boot log is going into a file on the card
+//!   (`logfile`) and everything logged has been saved with nothing new for two seconds, the LED shows the
+//!   **log saved** signal instead of solid on: two short blinks, then about a second of dark, over and over;
+//!   new log text brings the solid light back until it is saved again.
 //! * [`blink_forever`], from a crash: the crash cycle (`rpikit::ledcrash`): 2 s of fast flashing
 //!   (about 5 Hz), so "on" means "running" and "flashing" means "crashed" even when nothing reached
 //!   the screen, then the boot stage reached, the kind of crash, the faulting PC and address as
@@ -98,6 +101,8 @@ pub fn stage(stage: Stage, ok: bool) {
         stage.name(),
         if ok { "" } else { " (failed)" }
     );
+    // A milestone is a good moment to save the boot log (a no-op until the card is up and has the log file).
+    super::logfile::milestone();
     if CODES.load(Ordering::Relaxed) {
         play(Burst::stage(stage, ok));
     }
@@ -107,7 +112,29 @@ pub fn stage(stage: Stage, ok: bool) {
 pub fn finish() {
     STAGE.store(ledcrash::MAX_STAGE, Ordering::Relaxed);
     crate::kprintln!("led: done, solid on");
+    super::logfile::milestone();
+    FINISHED.store(true, Ordering::Release);
     on();
+}
+
+/// The boot is done and the LED is solid on (set by [`finish`]).
+static FINISHED: AtomicBool = AtomicBool::new(false);
+
+/// May the log writer show its "log saved" signal? Only once the boot is over, with no crash, and not
+/// when the codes are off (`milk.ledcodes=0`).
+pub fn saved_signal_allowed() -> bool {
+    FINISHED.load(Ordering::Acquire)
+        && CODES.load(Ordering::Relaxed)
+        && !CRASHED.load(Ordering::Relaxed)
+}
+
+/// Drive the LED for the "log saved" signal: two short blinks and a pause, repeating (solid on = still
+/// writing or no log file). Ignored before the boot is over and after a crash.
+pub fn saved_signal(on: bool) {
+    if !FINISHED.load(Ordering::Acquire) || CRASHED.load(Ordering::Relaxed) {
+        return;
+    }
+    reg_write(if on { GPSET1 } else { GPCLR1 }, PIN_BIT);
 }
 
 // ---- the crash cycle ----------------------------------------------------------------------
@@ -171,6 +198,7 @@ pub fn note_exception(esr: u64, elr: u64, far: u64) {
     );
     note(rec);
     log_code(rec, format_args!("exception"));
+    super::logfile::crash_flush();
 }
 
 /// The kernel stack overflowed.
@@ -178,6 +206,7 @@ pub fn note_stack_overflow(elr: u64, far: u64) {
     let rec = CrashRecord::new(STAGE.load(Ordering::Relaxed), ledcrash::EC_STACK_OVERFLOW, elr, far);
     note(rec);
     log_code(rec, format_args!("stack overflow"));
+    super::logfile::crash_flush();
 }
 
 /// A Rust panic: the cycle carries the source line and a hash of the file name.
@@ -189,6 +218,7 @@ pub fn note_panic(info: &core::panic::PanicInfo) {
     let rec = CrashRecord::panic(STAGE.load(Ordering::Relaxed), file, line);
     note(rec);
     log_code(rec, format_args!("panic at {file}:{line}"));
+    super::logfile::crash_flush();
 }
 
 /// Show the crash cycle until the end of time. Never returns. Needs no allocator, no timer interrupt
@@ -201,6 +231,8 @@ pub fn blink_forever() -> ! {
             unsafe { core::arch::asm!("wfe", options(nomem, nostack)) };
         }
     }
+    // The log file gets the last of the log (the crash screens may have added to it) before the cycle starts.
+    super::logfile::crash_flush();
     make_output();
     loop {
         // The record is read again every round, so a late note still shows.

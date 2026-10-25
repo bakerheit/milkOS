@@ -1944,3 +1944,24 @@ mod ledcrash_tests {
     const GOLDEN_LEN: usize = 120;
     const GOLDEN_SUM: u64 = 925_751_336;
 }
+
+#[test]
+fn a_mailbox_reply_is_matched_by_channel_and_buffer_not_by_alias() {
+    use crate::mailbox::{BUS_ALIASES, Echo, echo};
+    let sent = 0xc012_3450 | 8;
+    assert_eq!(echo(sent, sent), Echo::Exact);
+    // The firmware hands the address back without the alias bits, or with another alias.
+    assert_eq!(echo(0x0012_3450 | 8, sent), Echo::SameBuffer);
+    assert_eq!(echo(0x4012_3450 | 8, sent), Echo::SameBuffer);
+    assert_eq!(echo(0xc012_3460 | 8, sent), Echo::OtherBuffer);
+    assert_eq!(echo(0xc012_3450 | 1, sent), Echo::OtherChannel);
+    assert_eq!(BUS_ALIASES[0], 0xc000_0000);
+    let mut seen = BUS_ALIASES.to_vec();
+    seen.sort_unstable();
+    seen.dedup();
+    assert_eq!(seen.len(), BUS_ALIASES.len());
+    // Every alias gives the same buffer back through bus_to_phys.
+    for a in BUS_ALIASES {
+        assert_eq!(mailbox::bus_to_phys(a | 0x12_3450), 0x12_3450);
+    }
+}

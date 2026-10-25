@@ -25,6 +25,7 @@ _real_start:
     // The bootloader hands us the device tree pointer in x0. Keep it in x19 (nothing
     // below touches x19) until we run high, then store it in __boot_dtb.
     mov     x19, x0
+    mrs     x20, CurrentEL                  // the exception level we were entered at (logged by rpi::diag)
 
     // Only core 0 runs; the others are started later (PSCI or the spin table, smp.rs).
     mrs     x0, mpidr_el1
@@ -117,6 +118,8 @@ _real_start:
     mov     sp, x0
     ldr     x0, =__boot_dtb
     str     x19, [x0]
+    ldr     x0, =__boot_el
+    str     x20, [x0]
     msr     tpidr_el1, xzr                  // per-CPU index 0 (percpu.rs)
     mov     x29, xzr
     mov     x30, xzr
@@ -131,6 +134,10 @@ _real_start:
 .balign 8
 .global __boot_dtb
 __boot_dtb:
+    .quad 0
+// CurrentEL as the kernel was entered (the value of the register: EL << 2).
+.global __boot_el
+__boot_el:
     .quad 0
 
 // The boot page tables (zeroed with the rest of .bss before use). boot_l0 is kept as

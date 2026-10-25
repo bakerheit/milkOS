@@ -85,6 +85,21 @@ fn wr(off: usize, v: u32) {
     unsafe { write_volatile((BASE + off) as *mut u32, v) }
 }
 
+/// The controller's registers, for a log when something does not come up.
+fn dump_registers() {
+    kprintln!(
+        "[pcie] registers: status {:#x} misc_ctrl {:#x} hard_debug {:#x} reset {:#x} link_cap {:#x} bar2 {:#x} win0 {:#x}/{:#x}",
+        rd(MISC_PCIE_STATUS),
+        rd(MISC_MISC_CTRL),
+        rd(MISC_HARD_PCIE_HARD_DEBUG),
+        rd(RGR1_SW_INIT_1),
+        rd(RC_CFG_PRIV1_LINK_CAPABILITY),
+        rd(MISC_RC_BAR2_CONFIG_LO),
+        rd(MISC_CPU_2_PCIE_MEM_WIN0_HI),
+        rd(MISC_CPU_2_PCIE_MEM_WIN0_LO)
+    );
+}
+
 fn set_bits(off: usize, mask: u32, val: u32) {
     wr(off, rd(off) & !mask | val & mask);
 }
@@ -197,7 +212,7 @@ pub fn host() -> Option<Host> {
                 w.size.min((1u64 << 32) - w.pci_addr),
             )
         });
-    kprintln!("[pcie] root complex at {PCIE_PHYS:#x}: bringing it up");
+    kprintln!("[pcie] root complex at {PCIE_PHYS:#x}: bringing it up (status before {:#x}, reset register {:#x})", rd(MISC_PCIE_STATUS), rd(RGR1_SW_INIT_1));
     // 1. Reset the bridge, then release it, and let the SerDes settle.
     wr(RGR1_SW_INIT_1, rd(RGR1_SW_INIT_1) | RGR1_INIT);
     delay_ms(1);
@@ -241,10 +256,12 @@ pub fn host() -> Option<Host> {
     let status = rd(MISC_PCIE_STATUS);
     if !link_up() {
         kprintln!("[pcie] the link did not come up (status {status:#x}): no USB devices");
+        dump_registers();
         return None;
     }
     if status & STATUS_PORT_RC == 0 {
         kprintln!("[pcie] the controller is not in root complex mode (status {status:#x})");
+        dump_registers();
         return None;
     }
     kprintln!("[pcie] link up (status {status:#x})");

@@ -384,7 +384,8 @@ fn connect(s: &Settings) -> bool {
         spi::write(bl, true);
     }
     if !spi::present() {
-        kprintln!("lcd: SPI0 does not answer (no such controller here?): no display on the header");
+        let (cs, clk) = spi::registers();
+        kprintln!("lcd: SPI0 does not answer (no such controller here?): no display on the header (CS {cs:#x} CLK {clk:#x})");
         return false;
     }
     spi::reset();

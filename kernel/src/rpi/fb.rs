@@ -69,19 +69,26 @@ fn map_buffer(phys: usize, size: usize) -> Option<usize> {
 
 fn configure(w: usize, h: usize) -> Option<Surface<'static>> {
     let (w, h) = (u32::try_from(w).ok()?, u32::try_from(h).ok()?);
-    let first = request(w, h);
-    // The mailbox answered unless the exchange itself failed (no buffer page, or it timed out).
+    // Is the mailbox itself working? That is stage 2 and says nothing about a display: a board with no
+    // monitor may answer every harmless question and still refuse to allocate a framebuffer (stage 3).
     if !LIVE.load(Ordering::Acquire) {
-        let answered = !matches!(
-            first,
-            Err(mailbox::Error::Timeout | mailbox::Error::NoMemory)
-        );
-        super::led::stage(rpikit::ledcode::Stage::Mailbox, answered);
+        let up = mailbox::probe();
+        super::led::stage(rpikit::ledcode::Stage::Mailbox, up);
+        if !up {
+            kprintln!("rpi fb: the mailbox does not answer, so there is no framebuffer to ask for");
+            return None;
+        }
     }
+    let first = request(w, h);
     let mut fb = match first {
         Ok(f) => f,
         Err(e) => {
             kprintln!("rpi fb: the firmware refused {w}x{h}: {e:?}");
+            // What does the firmware think the display is? (Nothing attached: 0x0, or its fallback mode.)
+            match mailbox::query(rpikit::mailbox::tag::GET_PHYSICAL_SIZE, &[], 2) {
+                Ok(v) => kprintln!("rpi fb: the firmware's own display size is {}x{}", v[0], v[1]),
+                Err(e) => kprintln!("rpi fb: the display size query failed too: {e:?}"),
+            }
             return None;
         }
     };

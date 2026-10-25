@@ -134,6 +134,7 @@ check '^rpi fb: 1024x768x32 pitch 4096 at ' "the mailbox framebuffer"
 check '^display: rpi mailbox framebuffer 1024x768' "the display on it"
 check '^\[sdhci\] .*card ready' "the SD card"
 check '^milkfs: mmcblk0 mounted at /Volumes/Milk' "milkfs on the SD card"
+check '^milklog: not writing a boot log file: no partition table' "the boot log writer leaves a milkfs card alone (no FAT, no log file)"
 check 'wm: desktop up' "the desktop"
 [ "$(led_lines)" = "$LED_ORDER" ] && ok "LED codes: the milestones in order ($(led_lines))" || bad "LED codes: wrong stages: $(led_lines)"
 PIN=$(cat "$T/pin1")

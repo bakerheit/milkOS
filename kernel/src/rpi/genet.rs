@@ -597,7 +597,13 @@ pub fn init() {
             PHY_ADDR.store(addr, Ordering::Release);
             phy_start(addr);
         }
-        None => kprintln!("[genet] no PHY answered on MDIO: no Ethernet"),
+        None => kprintln!(
+            "[genet] no PHY answered on MDIO: no Ethernet (umac cmd {:#x} port ctrl {:#x} rgmii oob {:#x} mdio cmd {:#x}, device tree phy hint {hint:?})",
+            rd(UMAC_CMD),
+            rd(SYS_PORT_CTRL),
+            rd(EXT_RGMII_OOB_CTRL),
+            rd(UMAC_MDIO_CMD)
+        ),
     }
     // Interrupt on received frames; DMA on.
     wr(INTRL2_MASK_SET, 0xffff_ffff);

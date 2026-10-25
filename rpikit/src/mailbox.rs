@@ -214,6 +214,42 @@ pub fn split_mail(word: u32) -> (u32, u32) {
     (word & !0xf, word & 0xf)
 }
 
+/// The bus aliases of ARM RAM worth trying for a message buffer, in order of preference. On the BCM2711 the
+/// VideoCore reaches the first GiB of ARM RAM at 0xc000_0000 + physical (the alias Linux uses; no VideoCore
+/// L2 caching), 0x4000_0000 + physical (the L2 allocating alias), and, as older chips did, 0x8000_0000 and
+/// 0x0000_0000. All four name the same bytes; they differ in the VideoCore's caching of them, which is why
+/// the first is preferred and the rest are only for a board where the first is not answered.
+pub const BUS_ALIASES: [u32; 4] = [0xc000_0000, 0x4000_0000, 0x8000_0000, 0x0000_0000];
+
+/// How a word read from mailbox 0 relates to the word we sent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Echo {
+    /// Same channel, same address.
+    Exact,
+    /// Same channel, same buffer under another alias (the top two address bits differ): the firmware
+    /// may hand the address back without the alias bits, or an earlier attempt's answer arrives late.
+    SameBuffer,
+    /// Same channel, a different buffer.
+    OtherBuffer,
+    /// Another channel.
+    OtherChannel,
+}
+
+/// Classify `got` (read from the mailbox) against `sent` (written to it).
+pub fn echo(got: u32, sent: u32) -> Echo {
+    let (ga, gc) = split_mail(got);
+    let (sa, sc) = split_mail(sent);
+    if gc != sc {
+        Echo::OtherChannel
+    } else if ga == sa {
+        Echo::Exact
+    } else if ga & 0x3fff_ffff == sa & 0x3fff_ffff {
+        Echo::SameBuffer
+    } else {
+        Echo::OtherBuffer
+    }
+}
+
 /// The ARM physical address behind a VideoCore bus address (the framebuffer the firmware
 /// returns is a bus address: the top two bits select an alias of RAM, the rest is the
 /// address).

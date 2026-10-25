@@ -19,6 +19,7 @@ Files: `kernel/src/platform.rs` (the board table), `kernel/src/el.S` (EL2 to EL1
 | Boot at EL2, drop to EL1, MMU on, higher-half kernel, 4 CPUs through the firmware's spin table | **runs** on qemu raspi4b (TCG); the EL2 and spin-table paths are exactly what the real firmware does |
 | PL011 console, GIC-400, generic timer, scheduler, userspace, the shell, the whole desktop | **runs** on qemu raspi4b |
 | Firmware mailbox, framebuffer (format, pitch and address from the firmware's answer) | **runs** on qemu raspi4b; the answer's shape is unit-tested against hostile values |
+| The boot log in a file on the card (`MILKLOG.TXT`, "The boot log in a file") | **runs** on qemu raspi4b against generated FAT32 cards (fragmented file, hostile cards that must be refused untouched, a crash flush; every other sector of the image is checked unchanged); the real SD controller, real cards and timing are untested |
 | Boot log and crash screen on HDMI, ACT LED codes, sign-of-life band | **runs** on qemu (screendumps are checked by the test; qemu models the GPIO block, so the test samples the LED pin: marker and codes, solid on, flashing after a crash); the LED's brightness and timing on a real board, and real HDMI scan-out, are untested |
 | SD card (SDHCI, polled PIO), as `/dev/mmcblk0`, milkfs on it | **runs** on qemu (its EMMC controller); **untested** on EMMC2 of a real board |
 | RAM from the device tree, several banks and holes | **runs** on qemu (two banks and a hole, the GPU's); 4 GB / 8 GB layouts are unit-tested and the allocator above 4 GiB is tested on qemu virt |
@@ -37,6 +38,7 @@ so those paths are skipped there) and logs what it reads; the first boot on a re
 scripts/pi-run.sh               # a window (cocoa) and the serial console on this terminal
 scripts/pi-run.sh headless      # serial only
 scripts/pi-qemu-test.sh         # the test: twelve boots, see its header (a few minutes)
+scripts/pi-log-test.sh          # the boot log in a file on a generated FAT32 card: ten boots, see its header
 ```
 
 `-M raspi4b` runs on TCG (`-accel hvf` does not work for the Raspberry Pi machines), so boots take a
@@ -73,7 +75,7 @@ them, so every existing option works unchanged:
 | `milk.sdwrite=1` | allow writes to the SD card (`/dev/mmcblk0` is read-only otherwise: a card that also boots Raspberry Pi OS must not be written by accident; Disk Utility, `disks` and milkfs all see it read-only) |
 | `milk.disable=pcie,usb,genet,sdhci,rng` | start without a driver that misbehaves on a real board (edit `cmdline.txt`, no rebuild): `pcie` (and with it USB), `usb`, `genet`, `sdhci`, `rng` |
 | `milk.fbscale=N` | magnify the boot log and crash screen font N times (default 1; 2 from 1600 px wide) |
-| `milk.ledcodes=0` | no ACT LED progress codes (the LED just turns on at the start of `kmain`; the `led: stage` log lines stay). Default on; the codes add about 9 s to a boot |
+| `milk.ledcodes=0` | no ACT LED progress codes (the LED just turns on at the start of `kmain`; the `led: stage` log lines stay; the "log saved" signal is off too). Default on; the codes add about 9 s to a boot |
 | `milk.lcd=ili9486` / `ili9488` / `st7796` | the 3.5-inch SPI display on the GPIO header (off without it; many more options: "3.5-inch SPI display") |
 | `milk.crashtest=early` / `late` | panic on purpose right after the display is up / once the desktop has been up 8 s (tests the crash screens); `late-off` / `late-reset`: the desktop's Shut Down / Restart after 5 s (tests the power paths) |
 
@@ -83,11 +85,12 @@ The kernel is one file the firmware loads. These are **your** steps; nothing in 
 a card or a disk.
 
 1. `scripts/pi-bootdir.sh /tmp/milkos-boot` builds the release kernel and puts `milkos8.img`,
-   `config.milkos.txt` and `cmdline.milkos.txt` in that folder (it refuses a folder on a mounted volume).
+   `config.milkos.txt`, `cmdline.milkos.txt` and the blank log file `MILKLOG.TXT` in that folder (it refuses a folder on a mounted volume).
 2. On the card's boot partition (the FAT one with `start4.elf`, `fixup4.dat`, `config.txt`): **keep a copy
    of `config.txt`**, copy `milkos8.img` next to the firmware's files, and make `config.txt` say
    what `config.milkos.txt` says: `arm_64bit=1`, `kernel=milkos8.img`, `hdmi_force_hotplug=1`, `max_framebuffers=1`
    and **no `dtoverlay=vc4-kms-v3d`** (milkOS draws on the firmware's framebuffer, not on a KMS display).
+   Copy `MILKLOG.TXT` onto the same partition too (an ordinary copy, name in capitals: "The boot log in a file").
    `cmdline.txt` can stay as it is (the kernel only looks at `milk.` words) or be replaced. The card is **read-only** to milkOS unless you add `milk.sdwrite=1` (so booting it cannot damage the other system; with the stock card there is no milkfs partition to write to anyway).
 3. Put the card in a Pi 4 with an HDMI screen (or, with `milk.lcd=ili9486` in `cmdline.txt`, the 3.5-inch SPI display on the
    header: "3.5-inch SPI display"). To go back: restore the old `config.txt`. **Boot options live in `cmdline.txt`**: one line, `milk.<name>=<value>` words separated by
@@ -198,12 +201,89 @@ There is no serial cable in this setup, so the kernel makes the screen the conso
 6. **No HDMI cable at all?** The 3.5-inch SPI display on the GPIO header gets the same boot log and crash screen
    (section "3.5-inch SPI display": `milk.lcd=ili9486` in `cmdline.txt`).
 
-**An option for later, not built:** keeping the log on the card. The boot partition is FAT, which the kernel
-can read (`fs/fat.rs`) and could write; a ring of the last log lines flushed to `milkos.log` on it (at a
-crash, and once a second while booting) would survive a reboot, so a board that dies before the screen works
-could still be diagnosed from another computer. It needs the SD driver to be trusted on real hardware first
-(it is the thing it would depend on), which is why it waits. A second cheap option: the same text as beeps or
-more LED patterns for failures before the framebuffer (the stage codes above already cover the milestones).
+## The boot log in a file
+
+A board with no serial cable and a screen that does not light up still has an SD card that fits a Mac. The kernel
+saves its log (the text that goes to the serial port and the screens, from the first line) into a file on the
+card's FAT boot partition, **`MILKLOG.TXT`**, which you make before the run:
+
+1. `scripts/pi-bootdir.sh OUTDIR` puts a blank `MILKLOG.TXT` (256 KiB: a header line, then spaces) in OUTDIR with the other boot files
+   (`scripts/pi-logfile.sh OUTDIR [KIB]` makes just that file). Copy it onto the boot partition with the Finder or `cp`,
+   name in capitals. **A new copy is fine; do not leave the old one out**: the kernel never creates a file.
+2. Boot the board. The kernel finds the file when the SD card is up (stage 5) and writes what has been logged so far; after that
+   it saves new log text every second or so, after every LED stage, and in a crash (the crash dump included, with the same
+   numbers the LED cycle carries).
+3. **When it is safe to power off**: once the desktop is up and everything is saved, the ACT LED stops being solid and shows
+   the **log saved signal**: two short blinks, then about a second of dark, over and over. (Solid on = still writing, or no
+   log file. After a crash, wait for the crash cycle to start: the log is flushed before it begins; give it ten seconds.)
+   Even a power cut earlier only loses the last second or two of text: nothing else on the card is touched.
+4. Put the card in the Mac. **`scripts/pi-readlog.sh /Volumes/<card>/MILKLOG.TXT > boot.log`** prints the log without its
+   padding and says on stderr whether the end marker is there ("end marker present": everything before the last flush is in the
+   file; "NO end marker": the board lost power or crashed during a flush, the text may stop mid-line). Hand over `boot.log`.
+   (`MILKLOG 1 boot=XXXXXXXX` is the first line: a number picked per boot, so a file that still holds an older boot's tail
+   further down cannot be confused with this one. The file is overwritten from the start on every boot.)
+
+**What it will and will not touch.** The kernel reads the partition table (the first FAT32 partition, type 0x0b or 0x0c), the FAT32 boot
+sector, the root directory (8.3 names, case-insensitive, long-name entries skipped) and the file's cluster chain through the FAT
+(fragmentation is fine, up to 128 pieces), and then **overwrites the data sectors of that one existing file, in place**. It never
+creates a file, never changes a FAT or a directory entry (not even the file's modification time or size), never touches another
+partition. It refuses, and writes nothing, if: there is no MBR / FAT32 partition, no `MILKLOG.TXT` in the root, the file is under 4 KiB or over 4 MiB, the
+chain leaves the volume, runs through a free, bad or reserved cluster, visits a cluster twice, has more or fewer clusters than the size
+needs, or the volume's numbers do not add up; each time one `milklog:` line says which. Every sector is checked against the file's chain
+immediately before it is written (`rpikit::fat::LogFile::contains`), and the host tests feed the parser garbage, loops and out-of-range
+clusters and check it never panics and never yields a sector outside the chain. The card in a milkfs-only setup (no FAT) is left alone: one log line.
+
+**Not the block device.** The log writer has its own narrow path on the SD controller (`sdhci::raw_read` / `raw_write`): programmed I/O, polling, no allocator, no scheduler,
+no VFS, usable with interrupts off from the panic and exception handlers. It is not subject to `milk.sdwrite=1`: that option protects
+`/dev/mmcblk0` from *ordinary* writes (so booting the card cannot damage Raspberry Pi OS's root partition); the log writer is a
+separate path that only `rpi/logfile.rs` calls, only for sectors it has just proved are in the log file's clusters, and it is used even when
+the block device is read-only or never came up. In a crash it takes the controller (waiting 0.3 s for a transfer in progress), puts card and controller
+in order (status read; stop-transmission only if the card is mid-transfer) and flushes; a flush in progress on another CPU gets half a second
+before its state is taken over and the file is written again from the ring. It runs from the boot CPU's low-priority `milklog` thread, from
+the milestones, and from the crash path.
+
+**Layout** (`rpikit::logimg`): `MILKLOG 1 boot=...`, then a header (version, build hash), a `--------` rule, then the log text from the first line
+(`kernel/src/klog.rs`: a 32 KiB ring; if more than that is logged between two flushes the file says how many bytes were lost), then
+one marker line `<<milklog end boot=... flush=N bytes=M>>`, then spaces. The marker is always the last thing written; a flush
+rewrites only the sector the text ended in and the new ones. A file that fills up keeps its marker (`full`) and drops further text.
+
+**What the log carries for a board you cannot see into**: `boot:` (build, the exception level the firmware entered at and the one the kernel runs at),
+`cpu:` (MIDR, MPIDR, the ID_AA64 feature registers, cache lines, counter frequency, SCTLR/TCR/MAIR), `dtb:` (model, compatible strings, memory
+banks, `/chosen` including `bootargs`, the CPUs, and the `compatible` / `status` / `reg` of the nodes the drivers use), `mbox:` (every step
+of the mailbox probe and the firmware's answers), `[sdhci]` (base clock and where it came from, OCR/RCA, the controller registers at every failed
+step), `[pcie]`, `[usb]`, `[genet]`, `[rng]`, `spi:` / `lcd:` (register values when a wait times out), and a `led: stage N name` line for each milestone.
+
+## The mailbox on a real board (what is known, what is guessed)
+
+On qemu the VideoCore mailbox works; on the first real board **stage 2 failed (slow 2)** while the kernel went on to stage 7. A failed stage 2 is
+a *transport* failure (the firmware did not hand our buffer back in time, or there was no buffer page); a firmware that answers but refuses the
+framebuffer (no monitor, `max_framebuffers=1`) is stage 3's failure, and since this change the two are separate: stage 2 is decided by a harmless
+message (the firmware revision) before any framebuffer is asked for, and the log shows the answers to the other harmless tags (board model and
+revision, serial, ARM and VideoCore memory split, throttling, temperature, the clocks, the firmware's idea of the display size).
+
+Reading the driver against the BCM2835/BCM2711 documentation and Linux's use of the interface: the register offsets (read mailbox 0 at +0x00, status +0x18 bit 30
+empty; write mailbox 1 at +0x20, status +0x38 bit 31 full; base `0xfe00b880`), the channel (8), the 16-byte alignment, the `0xc0000000 | phys` bus address (the
+alias Linux uses on the BCM2711), the clean+invalidate before and after and the `dsb` before the doorbell all look right. The suspicions, most likely first
+(none can be confirmed without a real run, the percentages are rough guesses and not measurements; **everything below is untested on hardware until the next real boot**):
+
+1. **The reply check was stricter than the hardware needs** (fixed, untested): the old code waited for a mailbox word equal to *our* bus address with the
+   channel, and gave up at the timeout otherwise. If the firmware hands the address back in another form (without the alias bits, say), every transaction would time out
+   while the firmware did answer. Now the answer is accepted if it is on channel 8 and names our buffer under any alias (`rpikit::mailbox::echo`), and the buffer's
+   response code (`0x80000000`) decides whether it is a good answer. Fairly plausible (~25%).
+2. **The bus alias** (worked around, untested): if `0xc0000000` is not the right alias on this firmware, nothing answers. The probe now tries `0xc0000000`, `0x40000000`,
+   `0x80000000` and `0x00000000` in turn (all four name the same RAM; they differ in how the VideoCore caches it) and logs which one answers. ~15%.
+3. **The first answer is slow** (changed, untested): the firmware may be busy with HDMI hot-plug detection when the kernel starts (`hdmi_force_hotplug=1`, no cable). The first
+   transaction now waits up to 2 s (was 1 s), the other aliases 0.5 s each. ~15%.
+4. **No message page** (`NoMemory`): the page must come from below 1 GiB. Logged with the allocator's numbers if it fails. ~10%.
+5. **Cache or ordering**: the code cleans and invalidates the page before and after and has a `dsb`; the only way it goes wrong is a non-coherent alias
+   (suspicion 2). The log shows the buffer's first words and both status registers after a failure, which tells a stale-cache read (the request still in the buffer
+   with response code 0 although the mailbox answered) from no answer at all. ~5%.
+6. **Something else** (the firmware not servicing the mailbox at all, power or clock state): the log prints `mbox: registers ...`, the status registers
+   before and after, any stale word waiting in mailbox 0, and the elapsed time, so the next real log decides.
+
+If no alias answers the mailbox is marked down and later calls fail immediately instead of costing a second each. The SD controller's base clock no longer depends on
+the mailbox: if the firmware cannot be asked, EMMC2 is assumed to run at 200 MHz (every Pi 4 firmware sets that; the device tree's fixed clock says the same),
+logged with its source, so a dead mailbox does not also cost the board its card (before, the capabilities register's base-clock field was the fallback, which the code already calls wrong on the BCM2711, so a card could have come up at a wrong clock or not at all; that may or may not have happened on the first real boot). Untested on hardware.
 
 ## Reading the ACT LED (no screen, no serial cable)
 
@@ -442,7 +522,7 @@ the touch chip "XPT2046" or "ADS7846"), and whether the pin header silkscreen sa
 **Mailbox** (`rpi/mailbox.rs`, messages in `rpikit::mailbox`): one transaction at a time under a lock, a page of
 RAM in the first GiB as the buffer (`0xc0000000 | phys` as the bus address, as Linux does), cache lines cleaned
 before and dropped after, status bits as in the BCM2835 datasheet (the read mailbox's bit 30 is *empty*, the
-write mailbox's bit 31 is *full*). Used for board revision, firmware revision, the MAC address, clock rates
+write mailbox's bit 31 is *full*). A probe (`mailbox::probe`, once, from the framebuffer's first request) sends the firmware revision through each bus alias until one answers and logs everything it sees ("The mailbox on a real board"). Used for board revision, firmware revision, the MAC address, clock rates
 (the SD controller's base clock, tag `GET_CLOCK_RATE`), power domains, the framebuffer, and the VL805 reset notify.
 
 **Framebuffer** (`rpi/fb.rs`): `SET_PHYSICAL_SIZE`, `SET_VIRTUAL_SIZE`, `SET_DEPTH 32`, `SET_PIXEL_ORDER 0`
@@ -458,7 +538,7 @@ inside the RAM we manage and its frames are reserved.
 EMMC2 needs that: 8 and 16 bit registers go through read-modify-write of the aligned word, the write-1-to-clear
 interrupt status through whole-word writes). Programmed I/O, polled, every wait bounded: reset, 3.3 V, 400 kHz
 identification (the divider from the clock the firmware reports), CMD0/CMD8/ACMD41/CMD2/CMD3/CMD9 (capacity from the CSD,
-version 1 and 2)/CMD7/ACMD6 (4 bit), 25 MHz, `CMD17/18/24/25` with auto CMD12. Registers as `/dev/mmcblk0`; the card
+version 1 and 2)/CMD7/ACMD6 (4 bit), 25 MHz, `CMD17/18/24/25` with auto CMD12. Registers as `/dev/mmcblk0`; besides the block device there is the boot log writer's narrow path (`raw_read` / `raw_write`, "The boot log in a file"). The card
 detect bit is not trusted on EMMC2 (the Pi does not wire it). Not yet: DMA (SDMA/ADMA2: the buffers are already below the DMA
 limit), high speed mode (50 MHz), UHS, CMD23, voltage switching, SDIO. `scripts/pi-qemu-test.sh` formats an image with milkfs,
 mounts it from the emulated card, writes a file, takes a snapshot, reboots and finds the file.

@@ -94,6 +94,7 @@ TESTS=(
   "selftest-boot|s|300|par|scripts/selftest-boot.sh"
   "serial-soak|q|300|par|scripts/serial-soak.sh 2 3"
   "pi-qemu-test|q|900|par|scripts/pi-qemu-test.sh"
+  "pi-log-test|q|900|par|scripts/pi-log-test.sh"
   "highmem-test|q|600|par|scripts/highmem-test.sh"
   "usb-test|q|600|par|scripts/usb-test.sh"
   "net-test|s|600|par|scripts/net-test.sh"

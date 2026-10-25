@@ -14,10 +14,12 @@
 //! Every wait on hardware here is bounded ([`Timeout`]): a device that never answers makes a
 //! driver give up, never the kernel hang.
 
+pub mod diag;
 pub mod fb;
 pub mod genet;
 pub mod lcd;
 pub mod led;
+pub mod logfile;
 pub mod mailbox;
 pub mod pcie;
 pub mod power;

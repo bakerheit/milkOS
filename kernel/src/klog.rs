@@ -80,3 +80,48 @@ pub fn tail(max: usize, mut f: impl FnMut(&[u8])) -> bool {
     }
     true
 }
+
+/// Where [`copy_since`] stopped.
+#[cfg(feature = "raspi")]
+pub struct Copied {
+    /// Bytes copied into the caller's buffer.
+    pub n: usize,
+    /// The position to ask from next time (the count of log bytes consumed so far).
+    pub next: u64,
+    /// Bytes between `from` and the first copied byte that the ring had already overwritten.
+    pub lost: u64,
+}
+
+#[cfg(feature = "raspi")]
+/// Bytes logged so far (the position a reader that has everything would have), or `None` if the
+/// ring is being written right now.
+pub fn total() -> Option<u64> {
+    RING.try_lock().map(|r| r.total)
+}
+
+#[cfg(feature = "raspi")]
+/// Copy the log bytes after position `from` into `out` (as many as fit; oldest first), for the
+/// boot log file. Never blocks: `None` if the ring is busy, unless `force` (a crash: the holder is
+/// the context that died, or another CPU that is about to stop) reads it without the lock.
+pub fn copy_since(from: u64, out: &mut [u8], force: bool) -> Option<Copied> {
+    let guard = RING.try_lock();
+    // SAFETY: only reads bytes of the array and the counter; see SpinLock::data_unchecked.
+    let r: &Ring = match &guard {
+        Some(g) => g,
+        None if force => unsafe { &*RING.data_unchecked() },
+        None => return None,
+    };
+    let total = r.total;
+    let oldest = total.saturating_sub(SIZE as u64);
+    let start = from.max(oldest);
+    let lost = start - from.min(start);
+    let n = ((total.saturating_sub(start)) as usize).min(out.len());
+    for (i, o) in out[..n].iter_mut().enumerate() {
+        *o = r.buf[((start + i as u64) as usize) & (SIZE - 1)];
+    }
+    Some(Copied {
+        n,
+        next: start + n as u64,
+        lost,
+    })
+}

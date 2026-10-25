@@ -192,6 +192,18 @@ impl<T> SpinLock<T> {
         self.owner.store(0, Ordering::Release);
     }
 
+    #[cfg(feature = "raspi")]
+    /// The protected data without taking the lock, for a crash path that must read it even if the
+    /// crashed context holds the lock (the boot log ring: bytes in an array, a racing writer can at worst
+    /// tear a line).
+    ///
+    /// # Safety
+    /// The caller must only read plain data that stays valid under a racing writer, and never use the
+    /// pointer for anything that needs the lock's exclusion.
+    pub unsafe fn data_unchecked(&self) -> *const T {
+        self.data.get()
+    }
+
     /// Is the lock held (by anyone)? For crash dumps and assertions.
     pub fn is_locked(&self) -> bool {
         self.owner.load(Ordering::Relaxed) != 0

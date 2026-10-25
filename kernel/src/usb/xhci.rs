@@ -225,7 +225,7 @@ impl Controller {
         if rd32(op + USBSTS) & STS_HALTED == 0 {
             wr32(op + USBCMD, rd32(op + USBCMD) & !CMD_RUN);
             if !wait(500, || rd32(op + USBSTS) & STS_HALTED != 0) {
-                kprintln!("[usb] the controller does not halt");
+                kprintln!("[usb] the controller does not halt (USBCMD {:#x} USBSTS {:#x})", rd32(op + USBCMD), rd32(op + USBSTS));
                 return None;
             }
         }
@@ -233,7 +233,7 @@ impl Controller {
         if !wait(1000, || {
             rd32(op + USBCMD) & CMD_RESET == 0 && rd32(op + USBSTS) & STS_NOT_READY == 0
         }) {
-            kprintln!("[usb] the controller does not come out of reset");
+            kprintln!("[usb] the controller does not come out of reset (USBCMD {:#x} USBSTS {:#x})", rd32(op + USBCMD), rd32(op + USBSTS));
             return None;
         }
         if rd32(op + PAGESIZE) & 1 == 0 {
@@ -273,9 +273,12 @@ impl Controller {
         wr32(ir, 1); // IMAN: clear a pending bit; interrupts stay off (polled)
         wr32(op + USBCMD, CMD_RUN);
         if !wait(500, || rd32(op + USBSTS) & STS_HALTED == 0) {
-            kprintln!("[usb] the controller does not start");
+            kprintln!("[usb] the controller does not start (USBCMD {:#x} USBSTS {:#x})", rd32(op + USBCMD), rd32(op + USBSTS));
             return None;
         }
+        kprintln!(
+            "[usb] xHCI HCSPARAMS1 {hcs1:#010x} HCSPARAMS2 {hcs2:#010x} HCCPARAMS1 {hcc1:#010x} caplength {caplength:#x} dboff {dboff:#x} rtsoff {rtsoff:#x}"
+        );
         kprintln!(
             "[usb] xHCI {}.{:x}: {} ports, {} slots, {} byte contexts, {} scratchpad pages",
             version >> 8,

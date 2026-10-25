@@ -30,6 +30,10 @@ const GPU: u8 = 2;
 /// The Pi's mailbox framebuffer.
 #[cfg(feature = "raspi")]
 const RPIFB: u8 = 3;
+/// The Pi's 3.5-inch SPI panel as the screen (no HDMI framebuffer): the desktop draws in RAM and
+/// the panel shows it, scaled down (rpi/lcd.rs).
+#[cfg(feature = "raspi")]
+const LCDFB: u8 = 4;
 static BACKEND: AtomicU8 = AtomicU8::new(NONE);
 
 fn backend() -> u8 {
@@ -42,10 +46,31 @@ static FRAMEBUFFER: SpinLock<Option<Surface<'static>>> = SpinLock::new(None);
 /// Initialise the display. Does nothing (and logs to the UART only) without a display device.
 pub fn init() {
     #[cfg(feature = "raspi")]
-    if let Some(fb) = crate::rpi::fb::init(WIDTH, HEIGHT) {
-        BACKEND.store(RPIFB, Ordering::Release);
-        let (w, h) = crate::rpi::fb::size();
-        return finish_init_boot_log(fb, "rpi mailbox framebuffer", w, h);
+    {
+        use crate::rpi::{fb, lcd};
+        // The panel on the GPIO header (if the command line asked for one and it came up) shows
+        // the boot log first: it is the only screen a board without an HDMI cable has.
+        lcd::boot_console();
+        let hdmi = if lcd::primary_wanted() {
+            None
+        } else {
+            fb::init(WIDTH, HEIGHT)
+        };
+        if let Some(fb) = hdmi {
+            BACKEND.store(RPIFB, Ordering::Release);
+            let (w, h) = fb::size();
+            return finish_init_boot_log(fb, "rpi mailbox framebuffer", w, h);
+        }
+        if lcd::ready()
+            && let Some(fb) = lcd::primary_surface(WIDTH, HEIGHT)
+        {
+            BACKEND.store(LCDFB, Ordering::Release);
+            *FRAMEBUFFER.lock() = Some(fb);
+            kprintln!(
+                "display: the SPI panel is the screen, the desktop draws {WIDTH}x{HEIGHT} in RAM and the panel shows it"
+            );
+            return;
+        }
     }
     let (fb, name) = match gpu::find().and_then(|t| gpu::init(t, WIDTH, HEIGHT)) {
         Some(fb) => {
@@ -151,7 +176,13 @@ pub fn take_framebuffer() -> Option<Surface<'static>> {
     if sink::screen_installed() {
         sink::remove_screen();
     }
-    FRAMEBUFFER.lock().take()
+    let fb = FRAMEBUFFER.lock().take();
+    // The SPI panel, if there is one, shows the desktop too from here on.
+    #[cfg(feature = "raspi")]
+    if fb.is_some() {
+        crate::rpi::lcd::desktop_started();
+    }
+    fb
 }
 
 /// No desktop after all: show the text console (mirroring `kprintln!`) on `fb`.
@@ -172,6 +203,8 @@ pub fn size() -> (usize, usize) {
         GPU => gpu::framebuffer().map_or((WIDTH, HEIGHT), |(_, w, h)| (w, h)),
         #[cfg(feature = "raspi")]
         RPIFB => crate::rpi::fb::size(),
+        #[cfg(feature = "raspi")]
+        LCDFB => crate::rpi::lcd::primary_size(),
         _ => ramfb::size(),
     }
 }
@@ -184,6 +217,8 @@ pub fn framebuffer() -> Option<*mut u32> {
         RAMFB => ramfb::framebuffer(),
         #[cfg(feature = "raspi")]
         RPIFB => crate::rpi::fb::framebuffer(),
+        #[cfg(feature = "raspi")]
+        LCDFB => crate::rpi::lcd::primary_framebuffer(),
         _ => None,
     }
 }
@@ -197,6 +232,8 @@ pub fn set_mode(w: usize, h: usize) -> Option<Surface<'static>> {
         RAMFB => ramfb::set_mode(w, h),
         #[cfg(feature = "raspi")]
         RPIFB => crate::rpi::fb::set_mode(w, h),
+        #[cfg(feature = "raspi")]
+        LCDFB => crate::rpi::lcd::primary_set_mode(w, h),
         _ => None,
     }
 }
@@ -213,6 +250,9 @@ pub fn present(rects: &[Rect]) {
     if backend() == GPU {
         gpu::present(rects);
     }
+    // The SPI panel shows what the desktop drew, in its own time.
+    #[cfg(feature = "raspi")]
+    crate::rpi::lcd::note_source(rects);
 }
 
 /// Show the whole framebuffer and wait until it is on screen, so the caller may draw again
@@ -223,6 +263,14 @@ pub fn sync() {
         gpu::present(&[Rect::new(0, 0, w as i32, h as i32)]);
         gpu::wait();
     }
+    #[cfg(feature = "raspi")]
+    crate::rpi::lcd::note_source_all();
+}
+
+/// Is the SPI panel the screen (there is no HDMI framebuffer)?
+#[cfg(feature = "raspi")]
+pub fn lcd_is_primary() -> bool {
+    backend() == LCDFB
 }
 
 /// [`sync`] from the panic handler: never blocks on a lock someone else may hold.

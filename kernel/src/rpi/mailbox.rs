@@ -153,6 +153,13 @@ pub fn clock_rate(id: u32) -> Result<u32, Error> {
     Ok(query(msg::tag::GET_CLOCK_RATE, &[id], 2)?[1])
 }
 
+/// The highest rate clock `id` will be set to, in Hz (0 if the firmware does not know it). The
+/// core clock follows the load between its lowest and highest rate, so a divider computed from
+/// the highest never makes a bus faster than asked.
+pub fn max_clock_rate(id: u32) -> Result<u32, Error> {
+    Ok(query(msg::tag::GET_MAX_CLOCK_RATE, &[id], 2)?[1])
+}
+
 /// Board revision code (the Pi's `Revision` line in /proc/cpuinfo).
 pub fn board_revision() -> Result<u32, Error> {
     Ok(query(msg::tag::GET_BOARD_REVISION, &[], 1)?[0])

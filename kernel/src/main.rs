@@ -89,7 +89,9 @@ macro_rules! kprintln {
             // The console, and the journal (unit "kernel").
             let _ = core::fmt::Write::write_fmt(&mut $crate::journal::Tee, format_args!($($arg)*));
             let _ = core::fmt::Write::write_str(&mut $crate::journal::Tee, "\n");
-        })
+        });
+        // Outside the lock: the Pi's LCD panel (if there is one) gets what the line changed.
+        $crate::sink::after_print();
     }};
 }
 
@@ -109,6 +111,10 @@ pub extern "C" fn kmain() -> ! {
     percpu::init_boot();
     // MMU + caches before anything takes a lock (atomics hang on Device memory).
     mem::init();
+    // The 3.5-inch SPI panel on the GPIO header, if the command line has one: up before the
+    // display layer so the boot log can reach it.
+    #[cfg(feature = "raspi")]
+    rpi::lcd::init();
     display::init();
     kprintln!("milkOS {VERSION} booting...");
     kprintln!("hello from the kernel");
@@ -126,6 +132,8 @@ pub extern "C" fn kmain() -> ! {
     virtio::init();
     crypto::init();
     sync::irq_enable();
+    #[cfg(feature = "raspi")]
+    rpi::lcd::irqs_live();
     if selftest::wants(selftest::TIMER) {
         selftest::run();
     }
@@ -155,6 +163,8 @@ pub extern "C" fn kmain() -> ! {
     proc::init();
     proc::start_init();
     fs::start_threads();
+    #[cfg(feature = "raspi")]
+    rpi::lcd::start();
     usb::start();
 
     // The desktop: compositor, window manager and shell, in its own thread. It owns the

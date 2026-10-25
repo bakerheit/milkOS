@@ -17,6 +17,14 @@ struct ScreenConsole {
     inner: UnsafeCell<Option<Console>>,
 }
 
+/// The second screen, on a Raspberry Pi with the 3.5-inch SPI display: the same text, on its own
+/// console (rpi/lcd.rs sends what it draws to the panel).
+#[cfg(feature = "raspi")]
+static LCD: ScreenConsole = ScreenConsole {
+    busy: AtomicBool::new(false),
+    inner: UnsafeCell::new(None),
+};
+
 // SAFETY: access to `inner` is guarded by `busy` (see `try_lock`).
 unsafe impl Sync for ScreenConsole {}
 
@@ -34,19 +42,23 @@ fn mmu_on() -> bool {
     sctlr & 1 != 0
 }
 
-/// Take the screen-console flag.
-fn try_lock() -> bool {
+/// Take a console's flag.
+fn try_lock_of(c: &ScreenConsole) -> bool {
     if !mmu_on() {
-        if SCREEN.busy.load(Ordering::Relaxed) {
+        if c.busy.load(Ordering::Relaxed) {
             return false;
         }
-        SCREEN.busy.store(true, Ordering::Relaxed);
+        c.busy.store(true, Ordering::Relaxed);
         return true;
     }
-    SCREEN
-        .busy
+    c.busy
         .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
         .is_ok()
+}
+
+/// Take the screen-console flag.
+fn try_lock() -> bool {
+    try_lock_of(&SCREEN)
 }
 
 /// Owner (CPU index + 1) of the line lock that keeps `kprintln!` lines from different CPUs
@@ -105,6 +117,53 @@ fn with_screen(f: impl FnOnce(&mut Console)) {
     SCREEN.busy.store(false, Ordering::Release);
 }
 
+/// Run `f` on the LCD console if one is installed and not already in use, then hand the rows it
+/// changed to the panel's driver. Nothing waits for the panel here: the driver sends them when it
+/// next can (`rpi::lcd::pump`, after the print lock is released, or its own thread).
+#[cfg(feature = "raspi")]
+fn with_lcd(f: impl FnOnce(&mut Console)) {
+    if !try_lock_of(&LCD) {
+        return;
+    }
+    // SAFETY: we hold the `busy` flag.
+    if let Some(c) = unsafe { &mut *LCD.inner.get() } {
+        f(c);
+        if let Some((lo, hi)) = c.take_dirty() {
+            crate::rpi::lcd::mark_rows(lo, hi);
+        }
+    }
+    LCD.busy.store(false, Ordering::Release);
+}
+
+/// From now on `kprintln!` output is also drawn on the LCD console.
+#[cfg(feature = "raspi")]
+pub fn install_lcd_console(console: Console) {
+    while !try_lock_of(&LCD) {
+        core::hint::spin_loop();
+    }
+    // SAFETY: we hold the `busy` flag.
+    unsafe { *LCD.inner.get() = Some(console) };
+    LCD.busy.store(false, Ordering::Release);
+}
+
+/// Stop drawing on the LCD console (the desktop has the panel now, or the crash screen).
+#[cfg(feature = "raspi")]
+pub fn remove_lcd_console() {
+    while !try_lock_of(&LCD) {
+        core::hint::spin_loop();
+    }
+    // SAFETY: we hold the `busy` flag.
+    unsafe { *LCD.inner.get() = None };
+    LCD.busy.store(false, Ordering::Release);
+}
+
+/// After a `kprintln!` line, outside the print lock: let the panel's driver send what changed.
+#[inline]
+pub fn after_print() {
+    #[cfg(feature = "raspi")]
+    crate::rpi::lcd::pump();
+}
+
 /// From now on `kprintln!` output is mirrored on screen.
 pub fn install_screen(console: Console) {
     while !try_lock() {
@@ -153,6 +212,8 @@ impl Write for Sink {
         let _ = crate::Uart.write_str(s);
         crate::klog::write(s);
         with_screen(|c| c.write_str(s));
+        #[cfg(feature = "raspi")]
+        with_lcd(|c| c.write_str(s));
         Ok(())
     }
 }

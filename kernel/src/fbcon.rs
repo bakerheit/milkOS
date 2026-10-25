@@ -58,6 +58,9 @@ pub struct Console {
     fg_idx: Option<u8>,
     bg_idx: Option<u8>,
     cursor_drawn: bool,
+    /// Instead of scrolling, the cursor goes back to the top after the last row and each new line
+    /// replaces the old one there (for a screen that is slow to redraw, the SPI panel).
+    wrap: bool,
     state: Parse,
     params: [u16; 8],
     nparams: usize,
@@ -91,6 +94,7 @@ impl Console {
             fg_idx: None,
             bg_idx: None,
             cursor_drawn: false,
+            wrap: false,
             state: Parse::Ground,
             params: [0; 8],
             nparams: 0,
@@ -120,8 +124,25 @@ impl Console {
         });
     }
 
+    /// Wrap around to the top instead of scrolling (see the field).
+    pub fn set_wrap(&mut self, wrap: bool) {
+        self.wrap = wrap;
+    }
+
+    /// The pixel rows `[lo, hi)` that changed since the last call, for a console that has no
+    /// shadow to flush from (the caller sends them wherever the picture goes).
+    pub fn take_dirty(&mut self) -> Option<(usize, usize)> {
+        let (lo, hi) = self.dirty.take()?;
+        let h = self.surface.height();
+        let (lo, hi) = (lo.min(h), hi.min(h));
+        (hi > lo).then_some((lo, hi))
+    }
+
     /// Copy the rows that changed to the screen (a no-op without a shadow).
     pub fn flush(&mut self) {
+        if self.shown.is_none() {
+            return;
+        }
         let Some((lo, hi)) = self.dirty.take() else {
             return;
         };
@@ -202,10 +223,24 @@ impl Console {
         }
     }
 
+    /// Blank the row the cursor is on (wrap mode: the old line goes as the new one starts).
+    fn clear_row(&mut self) {
+        let (x, y) = self.cell_xy(0, self.cy);
+        self.mark(y as usize, y as usize + self.ch());
+        self.surface
+            .fill_rect(x, y, (self.cols * self.cw()) as i32, self.ch() as i32, DEFAULT_BG);
+    }
+
     fn newline(&mut self) {
         self.cx = 0;
         if self.cy + 1 < self.rows {
             self.cy += 1;
+            if self.wrap {
+                self.clear_row();
+            }
+        } else if self.wrap {
+            self.cy = 0;
+            self.clear_row();
         } else {
             let (x, y) = self.cell_xy(0, 0);
             self.mark(MARGIN, MARGIN + self.rows * self.ch());

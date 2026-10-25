@@ -8,18 +8,22 @@
 //! * [`sdhci`]: the SD host controller (EMMC2 on a real board; qemu's raspi4b has the EMMC1
 //!   one), as a block device.
 //! * [`genet`]: the Gigabit Ethernet MAC. Not modelled by qemu, so untested until hardware.
+//! * [`spi`], [`lcd`]: SPI0 and the GPIO pins, and the 3.5-inch SPI display with its touch chip on
+//!   them (off unless `milk.lcd=` names a controller; rpikit::lcd and rpikit::touch are the pure parts).
 //!
 //! Every wait on hardware here is bounded ([`Timeout`]): a device that never answers makes a
 //! driver give up, never the kernel hang.
 
 pub mod fb;
 pub mod genet;
+pub mod lcd;
 pub mod led;
 pub mod mailbox;
 pub mod pcie;
 pub mod power;
 pub mod rng;
 pub mod sdhci;
+pub mod spi;
 
 use core::arch::asm;
 

@@ -9,7 +9,19 @@ use std::process::Command;
 /// qemu raspi4b) at 0x80000 (feature `raspi`; kernel/src/platform.rs has the rest of the board).
 fn link_script(dir: &str) {
     let raspi = std::env::var_os("CARGO_FEATURE_RASPI").is_some();
-    let phys = if raspi { "0x80000" } else { "0x40080000" };
+    let msm = std::env::var_os("CARGO_FEATURE_MSM8998").is_some();
+    let msm_virt = std::env::var_os("CARGO_FEATURE_MSM_VIRT_TEST").is_some();
+    // The Pixel 2 build is linked at DRAM (0x8000_0000) + the arm64 text_offset 0x80000; its qemu
+    // test build sits where a virt kernel does.
+    let phys = if msm_virt {
+        "0x40080000"
+    } else if msm {
+        "0x80080000"
+    } else if raspi {
+        "0x80000"
+    } else {
+        "0x40080000"
+    };
     let text = fs::read_to_string(format!("{dir}/linker.ld")).expect("read linker.ld");
     let placeholder = "KERNEL_PHYS = 0x40080000;";
     assert!(
@@ -26,6 +38,16 @@ fn link_script(dir: &str) {
 fn main() {
     let dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     link_script(&dir);
+    // The text_offset the arm64 Image header states (boot.S): 0x80000, except in the relocation test
+    // build, where MILK_TEXT_OFFSET (default 0x180000) makes qemu load the image at another address
+    // than it is linked for.
+    let text_offset = if std::env::var_os("CARGO_FEATURE_MSM_RELOC_TEST").is_some() {
+        std::env::var("MILK_TEXT_OFFSET").unwrap_or_else(|_| "0x180000".to_string())
+    } else {
+        "0x80000".to_string()
+    };
+    println!("cargo:rustc-env=MILK_TEXT_OFFSET={text_offset}");
+    println!("cargo:rerun-if-env-changed=MILK_TEXT_OFFSET");
     println!("cargo:rerun-if-changed=src/boot.S");
     let repo = Path::new(&dir).parent().unwrap();
     // The one version number (<repo>/VERSION), see docs/versioning.md:
@@ -46,10 +68,35 @@ fn main() {
     println!("cargo:rustc-env=MILKOS_GIT={git_id}");
     println!("cargo:rerun-if-changed={}", repo.join("VERSION").display());
     println!("cargo:rerun-if-env-changed=MILKOS_RELEASE");
+    if std::env::var_os("CARGO_FEATURE_MSM8998").is_some() {
+        // The Pixel 2's stage 1 runs no user programs and draws no art: an empty initramfs and
+        // no icon tables keep the image small (the bootloader loads all of it into RAM).
+        empty_initramfs_and_art();
+        return;
+    }
     // User programs first: the initramfs packs them (initramfs.list).
     build_user(repo);
     build_initramfs(repo, &version);
     build_art(repo);
+}
+
+/// The initramfs with only its trailer, and the art tables empty (as `build_art` leaves them when
+/// python3 is missing): for the Pixel 2 image.
+fn empty_initramfs_and_art() {
+    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let mut cpio = Cpio {
+        out: Vec::new(),
+        ino: 0,
+    };
+    cpio.entry("TRAILER!!!", 0, &[]);
+    fs::write(out.join("initramfs.cpio"), &cpio.out).expect("initramfs: write archive");
+    let art = out.join("art");
+    fs::create_dir_all(&art).unwrap();
+    fs::write(
+        art.join("art.rs"),
+        "pub static ICONS: &[IconArt] = &[];\npub static IMAGES: &[ImageArt] = &[];\n",
+    )
+    .unwrap();
 }
 
 // ---- art ------------------------------------------------------------------------------

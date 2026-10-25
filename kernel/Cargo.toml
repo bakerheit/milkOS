@@ -39,6 +39,15 @@ rpikit = { path = "../rpikit" }
 # linked for the Pi firmware's load address (0x80000) and the board table in platform.rs is the
 # Pi's. One source tree, two images (docs/raspberry-pi.md).
 raspi = []
+# Build for the Google Pixel 2 (Qualcomm MSM8998): stage 1, a boot image `fastboot boot` can run that
+# draws on the screen. Linked for DRAM + 0x80000, no UART, no user programs (docs/pixel2.md).
+msm8998 = []
+# The Pixel 2 code run on qemu virt (RAM at 0x40000000, GICv3, ramfb as the screen, the PL011 for the
+# test to read): scripts/pixel2-qemu-test.sh. Not an image for the phone.
+msm-virt-test = ["msm8998"]
+# ...with the Image header saying a different text_offset than the image is linked for, so qemu loads it
+# somewhere else and the relocation in boot.S has to move it.
+msm-reloc-test = ["msm-virt-test"]
 # Boot self-test ends with a deliberate bad-pointer read to prove the crash dump.
 crash-test = []
 # Scheduler self-test ends with a thread recursing forever, to prove the stack guard.

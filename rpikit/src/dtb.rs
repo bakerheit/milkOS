@@ -22,7 +22,7 @@ pub struct MemRange {
     pub size: usize,
 }
 
-pub const MAX_BANKS: usize = 8;
+pub const MAX_BANKS: usize = 32;
 /// CPUs [`Dtb::cpus`] reports.
 pub const MAX_CPUS: usize = 8;
 
@@ -111,6 +111,23 @@ pub fn usable_banks(
     };
     banks.copy_within(first..m, 0);
     (banks, m - first)
+}
+
+/// A `reg` property read as `(address, size)` pairs of `ac` and `sc` 32-bit cells (1 or 2 each);
+/// up to `out.len()` pairs. Anything else (0 cells, 3 or more) gives none.
+pub fn parse_reg(data: &[u8], ac: usize, sc: usize, out: &mut [(u64, u64)]) -> usize {
+    if !(1..=2).contains(&ac) || !(1..=2).contains(&sc) {
+        return 0;
+    }
+    let cell = |at: usize| u32::from_be_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]]) as u64;
+    let rd = |at: usize, n: usize| (0..n).fold(0u64, |v, i| (v << 32) | cell(at + 4 * i));
+    let entry = (ac + sc) * 4;
+    let mut n = 0;
+    while (n + 1) * entry <= data.len() && n < out.len() {
+        out[n] = (rd(n * entry, ac), rd(n * entry + ac * 4, sc));
+        n += 1;
+    }
+    n
 }
 
 pub struct Dtb {
@@ -356,6 +373,180 @@ impl Dtb {
                 _ => return,
             }
         }
+    }
+
+    /// The memory reservation block of the header (`/memreserve/` entries): `(address, size)`
+    /// pairs, up to the terminating zero entry. Returns how many were stored in `out`.
+    pub fn mem_reserve(&self, out: &mut [MemRange]) -> usize {
+        let off = be32(self.base + 16) as usize;
+        let mut n = 0;
+        let mut p = off;
+        while p % 8 == 0 && p.checked_add(16).is_some_and(|e| e <= self.total_size) {
+            let rd = |at: usize| ((be32(self.base + at) as u64) << 32) | be32(self.base + at + 4) as u64;
+            let (a, s) = (rd(p), rd(p + 8));
+            if a == 0 && s == 0 {
+                break;
+            }
+            if n < out.len() {
+                out[n] = MemRange {
+                    base: a as usize,
+                    size: s as usize,
+                };
+                n += 1;
+            }
+            p += 16;
+        }
+        n
+    }
+
+    /// Like [`Dtb::for_each_prop_id`], with the `#address-cells` / `#size-cells` the node's
+    /// *parent* declares (what the node's `reg` is written in): `f(parent name, node name, node
+    /// id, depth, (address cells, size cells), property name, data)`. A node that declares
+    /// none inherits nothing, as the specification says: 2 address cells and 1 size cell.
+    pub fn for_each_prop_cells(
+        &self,
+        mut f: impl FnMut(&[u8], &[u8], usize, usize, (usize, usize), &[u8], &[u8]),
+    ) {
+        let mut ids = [0usize; 16];
+        let mut cells = [(2usize, 1usize); 16];
+        // The cells each node declares for its children, by depth; (2, 1) until it says.
+        let mut declared = [(2usize, 1usize); 16];
+        let mut stack: [&[u8]; 16] = [b""; 16];
+        let mut depth = 0usize;
+        let start = self.base + self.struct_off;
+        let end = start + self.struct_size;
+        let strings = self.base + self.strings_off;
+        let limit = self.base + self.total_size;
+        let mut p = start;
+        while p + 4 <= end {
+            let token = be32(p);
+            p += 4;
+            match token {
+                FDT_BEGIN_NODE => {
+                    let at = p - 4 - start;
+                    let name = self.cstr(p, end);
+                    p = (p + name.len() + 1 + 3) & !3;
+                    depth += 1;
+                    let d = depth.min(15);
+                    stack[d] = name;
+                    ids[d] = at;
+                    // What this node's own `reg` is written in: its parent's declaration.
+                    cells[d] = declared[(d - 1).min(15)];
+                    declared[d] = (2, 1);
+                }
+                FDT_END_NODE => depth = depth.saturating_sub(1),
+                FDT_PROP => {
+                    if p + 8 > end {
+                        return;
+                    }
+                    let len = be32(p) as usize;
+                    let name_off = be32(p + 4) as usize;
+                    let data = p + 8;
+                    if data.checked_add(len).is_none_or(|e| e > end) {
+                        return;
+                    }
+                    p = (data + len + 3) & !3;
+                    let name = self.cstr(strings.saturating_add(name_off), limit);
+                    // SAFETY: inside the blob (checked above).
+                    let bytes = unsafe { core::slice::from_raw_parts(data as *const u8, len) };
+                    let d = depth.min(15);
+                    if len == 4 && name == b"#address-cells" {
+                        declared[d].0 = be32(data) as usize;
+                    } else if len == 4 && name == b"#size-cells" {
+                        declared[d].1 = be32(data) as usize;
+                    }
+                    let parent = if depth >= 2 {
+                        stack[(depth - 1).min(15)]
+                    } else {
+                        b""
+                    };
+                    f(parent, stack[d], ids[d], depth, cells[d], name, bytes);
+                }
+                FDT_NOP => {}
+                _ => return,
+            }
+        }
+    }
+
+    /// The `reg` ranges of the first node whose name starts with `prefix` (at depth 2 or
+    /// deeper), read with the cell sizes of its parent. Returns how many `(address, size)` pairs
+    /// were stored in `out`. A `reg` with 3 or more cells for an address or a size is skipped.
+    pub fn node_reg(&self, prefix: &[u8], out: &mut [(u64, u64)]) -> usize {
+        let mut n = 0;
+        let mut done = false;
+        self.for_each_prop_cells(|_parent, node, _id, depth, (ac, sc), prop, data| {
+            if done || depth < 2 || !node.starts_with(prefix) || prop != b"reg" {
+                return;
+            }
+            done = true;
+            n = parse_reg(data, ac, sc, out);
+        });
+        n
+    }
+
+    /// The `reg` ranges of the first node whose `compatible` lists `compat` (as a whole string),
+    /// read with the cell sizes of its parent: `(address, size)` pairs stored in `out`, how many.
+    /// For nodes whose name differs between trees (`interrupt-controller@17a00000` here,
+    /// `intc@8000000` on qemu).
+    pub fn node_reg_compat(&self, compat: &[u8], out: &mut [(u64, u64)]) -> usize {
+        // Pass 1: which node. Pass 2: its reg.
+        let mut which = None;
+        self.for_each_prop_cells(|_p, _n, id, depth, _c, prop, data| {
+            if which.is_none()
+                && depth >= 2
+                && prop == b"compatible"
+                && data.split(|&b| b == 0).any(|s| s == compat)
+            {
+                which = Some(id);
+            }
+        });
+        let Some(want) = which else { return 0 };
+        let mut n = 0;
+        self.for_each_prop_cells(|_p, _n, id, _d, (ac, sc), prop, data| {
+            if id == want && prop == b"reg" && n == 0 {
+                n = parse_reg(data, ac, sc, out);
+            }
+        });
+        n
+    }
+
+    /// The fixed regions the tree reserves: the `/memreserve/` entries and every child of
+    /// `/reserved-memory` that has a `reg` (the ones with only a `size` are for the operating
+    /// system to place, they are not anywhere yet). Returns how many were stored in `out`.
+    pub fn reserved_regions(&self, out: &mut [MemRange]) -> usize {
+        let mut n = self.mem_reserve(out);
+        self.for_each_prop_cells(|parent, _node, _id, depth, (ac, sc), prop, data| {
+            if depth != 3 || parent != b"reserved-memory" || prop != b"reg" {
+                return;
+            }
+            let mut tmp = [(0u64, 0u64); 4];
+            let k = parse_reg(data, ac, sc, &mut tmp);
+            for &(a, s) in &tmp[..k] {
+                if s != 0 && n < out.len() {
+                    out[n] = MemRange {
+                        base: a as usize,
+                        size: s as usize,
+                    };
+                    n += 1;
+                }
+            }
+        });
+        n
+    }
+
+    /// The name and `reg` of every child of `/reserved-memory` with one, for the log. Calls
+    /// `f(name, base, size)`.
+    pub fn each_reserved_child(&self, mut f: impl FnMut(&[u8], u64, u64)) {
+        self.for_each_prop_cells(|parent, node, _id, depth, (ac, sc), prop, data| {
+            if depth != 3 || parent != b"reserved-memory" || prop != b"reg" {
+                return;
+            }
+            let mut tmp = [(0u64, 0u64); 4];
+            let k = parse_reg(data, ac, sc, &mut tmp);
+            for &(a, s) in &tmp[..k] {
+                f(node, a, s);
+            }
+        });
     }
 
     /// Read the `reg` ranges of every top-level `memory` node. Returns how many

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+**Pixel 2** (docs/pixel2.md)
+- Stage 1 of the port to the Google Pixel 2 (Snapdragon 835, MSM8998): a boot image that `fastboot boot` can run and that draws on the screen. Feature `msm8998` (`scripts/android-build.sh OUTDIR [--stock-dtb FILE]` builds the kernel, a release
+  Image of about 200 KB with no user programs, and the boot images, with a README of the exact commands; nothing is flashed or written). The image draws four labelled colour blocks, a white edge frame and two diagonals into the bootloader's framebuffer
+  (the tree's `splash_region`) before any memory is set up, so a wrong pixel order, row length or crop is obvious to a person (`msm.fmt=`, `msm.stride=`, `msm.size=`, `msm.fb=` change the guess); then RAM from the tree with every
+  reserved region taken out (the secure world's and the modem's are never mapped), the boot log as a text console (CPU, tree, memory, timer, GICv3 identification read only, ramoops regions, watchdog registers), crash screens, and a counter and a
+  moving marker that show a frozen phone. One CPU, polled timer, no interrupt, no UART, no storage; the kernel never powers off or resets the phone. `boot.S` moves the image to its link address whatever address the bootloader loads
+  it at (and the tree with it). Optional, off by default: `msm.wdt=pet` (one watchdog write a second), `msm.kick=ctlN` (display controller refresh kick), `msm.mdp=dump` (read only), `msm.psci=1` (`PSCI_VERSION`).
+  `scripts/android-bootimg.py` builds and unpacks version 0 boot images (reproduces the phone's own header and id byte for byte), `scripts/dtb_build.py` writes the small Pixel 2 device tree (or copies yours unchanged), lists a dtbo
+  partition, and is the device tree writer and reader the tests use. Pure parts in `rpikit` (`bootimg`, `fdtwrite`, `msm`: options, pixel formats, pattern, RAM carving, GICv3 decoding; the tree reader gains `/memreserve/`, `/reserved-memory` and `reg` with the right cell sizes).
+  New `pixel2-tools-test` and `pixel2-qemu-test` (the same code on qemu `virt` with a GICv3 and ramfb: screendumps of the pattern, console, counter and crash screens, four relocations, a phone-shaped tree with sentinel words in reserved regions and the framebuffer read back).
+  **Untested on the phone**: whether the bootloader runs the image, whether writes to that RAM reach the panel, the pixel order; docs/pixel2.md ranks them and says what each outcome means.
+
 **Raspberry Pi 4** (docs/raspberry-pi.md)
 - The Ethernet freeze after the cable goes in now reaches the first transmit and the next real run can say what stops the board ("GENET transmit" in docs/raspberry-pi.md). The transmit path was
   reviewed against the controller's register layout (descriptor words and flags, ring geometry, doorbell order, buffer address, UMAC bits, interrupt mask) and host-tested (`rpikit::genet`: the descriptor words, the ring end,

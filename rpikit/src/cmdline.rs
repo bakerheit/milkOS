@@ -11,6 +11,11 @@
 /// quotes of a quoted value. `None` if the option is absent. The first of two equal names
 /// wins.
 pub fn find(line: &[u8], name: &str) -> Option<(usize, usize)> {
+    find_prefixed(line, "milk.", name)
+}
+
+/// Like [`find`], for options that start with another prefix than `milk.` (`msm.fmt=...`).
+pub fn find_prefixed(line: &[u8], prefix: &str, name: &str) -> Option<(usize, usize)> {
     let is_sep = |b: u8| b == b' ' || b == b'\n' || b == b'\r' || b == b'\t';
     let mut i = 0;
     while i < line.len() {
@@ -29,7 +34,7 @@ pub fn find(line: &[u8], name: &str) -> Option<(usize, usize)> {
             i += 1;
         }
         let word = &line[start..i];
-        let Some(rest) = word.strip_prefix(b"milk.") else {
+        let Some(rest) = word.strip_prefix(prefix.as_bytes()) else {
             continue;
         };
         let Some(eq) = rest.iter().position(|&c| c == b'=') else {
@@ -38,8 +43,9 @@ pub fn find(line: &[u8], name: &str) -> Option<(usize, usize)> {
         if &rest[..eq] != name.as_bytes() {
             continue;
         }
-        let mut off = start + 5 + eq + 1;
-        let mut len = word.len() - (5 + eq + 1);
+        let skip = prefix.len() + eq + 1;
+        let mut off = start + skip;
+        let mut len = word.len() - skip;
         if len >= 2 && line[off] == b'"' && line[off + len - 1] == b'"' {
             off += 1;
             len -= 2;
@@ -52,6 +58,11 @@ pub fn find(line: &[u8], name: &str) -> Option<(usize, usize)> {
 /// The value of option `milk.<name>` as bytes.
 pub fn value<'a>(line: &'a [u8], name: &str) -> Option<&'a [u8]> {
     find(line, name).map(|(o, l)| &line[o..o + l])
+}
+
+/// The value of option `<prefix><name>` as bytes.
+pub fn value_prefixed<'a>(line: &'a [u8], prefix: &str, name: &str) -> Option<&'a [u8]> {
+    find_prefixed(line, prefix, name).map(|(o, l)| &line[o..o + l])
 }
 
 /// The fw_cfg file name a launcher would use (`opt/milkos/selftest`) to the option name

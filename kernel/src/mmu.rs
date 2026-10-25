@@ -539,6 +539,8 @@ global_asm!(
     L1_1 = const boot_block(1),
     L1_2 = const boot_block(2),
     L1_3 = const boot_block(3),
+    RELOC = const platform::RELOCATE as u64,
+    TEXT_OFFSET = const platform::TEXT_OFFSET,
 );
 
 // The TTBR1 swap must run while nothing uses TTBR1: it is called at its *physical*

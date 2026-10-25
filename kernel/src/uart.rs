@@ -113,6 +113,10 @@ pub fn early_init() {
 
 /// Send one byte to the console UART(s). Polled; on the Pi it waits (bounded) for FIFO room.
 pub fn putc(b: u8) {
+    if crate::platform::NO_UART {
+        // The Pixel 2 has no console UART: the log goes to the screen and the kernel log only.
+        return;
+    }
     if !crate::platform::RASPI {
         // qemu virt's PL011 never fills up; the write has always been blind.
         reg_write(0, b as u32);

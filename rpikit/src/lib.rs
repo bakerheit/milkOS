@@ -33,12 +33,14 @@
 #[cfg(test)]
 extern crate std;
 
+pub mod bootimg;
 pub mod cmdline;
 pub mod dtb;
 pub mod esr;
 pub mod fat;
 pub mod fbpresent;
 pub mod fbsize;
+pub mod fdtwrite;
 pub mod genet;
 pub mod ledcode;
 pub mod ledcrash;
@@ -48,6 +50,7 @@ pub mod lcdprobe;
 pub mod logintake;
 pub mod milklog;
 pub mod mailbox;
+pub mod msm;
 pub mod pci;
 pub mod pcie;
 pub mod sd;

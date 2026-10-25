@@ -188,7 +188,7 @@ extern "C" fn kstack_overflow(sp: u64, elr: u64, far: u64, esr: u64) -> ! {
         ec_name((esr >> 26) & 0x3f)
     );
     kprintln!("*** halted ***");
-    if crate::platform::RASPI {
+    if crate::platform::SCREEN_ONLY {
         // No serial cable on the Pi: the dump on the screen, the LED cycle.
         #[cfg(feature = "raspi")]
         crate::rpi::led::note_stack_overflow(elr, far);
@@ -477,9 +477,11 @@ pub fn crash(frame: &TrapFrame, vector: usize, what: &str) -> ! {
     );
     crate::serror::summary(cpu, vector);
     kprintln!("*** halted ***");
-    if crate::platform::RASPI {
-        // No serial cable on the Pi: the same dump on the screens, then the LED cycle (the code line
-        // is logged first so the crash screens end with it).
+    if crate::platform::SCREEN_ONLY {
+        // No serial cable on the Pi (or the Pixel 2): the same dump on the screens, then the LED cycle
+        // (the code line is logged first so the crash screens end with it).
+        #[cfg(not(feature = "raspi"))]
+        crate::crashscreen::show();
         #[cfg(feature = "raspi")]
         {
             if vector % 4 == 0 || vector % 4 == 3 {

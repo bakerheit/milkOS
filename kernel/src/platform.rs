@@ -1,8 +1,9 @@
 //! The board the kernel runs on: where its devices are, what it has and what it does not.
 //!
-//! One source tree, two boards: qemu `virt` (the default build) and the Raspberry Pi 4 (the
+//! One source tree, three boards: qemu `virt` (the default build), the Raspberry Pi 4 (the
 //! BCM2711; feature `raspi`, which also decides the image's link address, see
-//! kernel/build.rs). Everything board specific reads [`CURRENT`], a constant, so a `virt`
+//! kernel/build.rs) and the Google Pixel 2 (the Snapdragon 835, MSM8998; feature `msm8998`,
+//! docs/pixel2.md; with `msm-virt-test` the same code is linked for qemu virt to be tested there). Everything board specific reads [`CURRENT`], a constant, so a `virt`
 //! build compiles to exactly what it did before this file existed and the Pi build has no
 //! dead `virt` code paths to trip over. Facts that depend on the firmware rather than the
 //! SoC (how much RAM, which CPUs, how to start them) still come from the device tree at
@@ -125,8 +126,61 @@ pub const RASPI4: Platform = Platform {
     psci_default_smc: true,
 };
 
+/// Google Pixel 2 (walleye): Qualcomm MSM8998 / Snapdragon 835, started by the Android bootloader
+/// (ABL) at EL1 with the MMU off and a device tree in x0. RAM starts at 0x8000_0000 (4 GB, with
+/// holes the tree describes). The SoC's peripherals are all in the first GiB (the GICv3 at
+/// 0x17a0_0000, the display controller at 0xc90_0000). There is no UART: the log goes on the
+/// screen. The bootloader's own framebuffer ("splash") lives in RAM (`/reserved-memory`), so the
+/// device ranges are only needed for the GIC and the display controller.
+pub const MSM8998: Platform = Platform {
+    name: "Pixel 2 (Snapdragon 835, MSM8998)",
+    dtb_compatible: "qcom,msm8998",
+    uart_base: 0,
+    uart_irq: 0,
+    gicd: 0x17a0_0000,
+    gicc: 0,
+    device: &[(0, 0x4000_0000)],
+    // Only the GiB the kernel and the bootloader's tree are in: nothing else is touched before the
+    // real tables exist (the protected carve-outs inside it are never touched either).
+    boot_map: [Block::None, Block::None, Block::Ram, Block::None],
+    // Stage 1 uses the first 2 GiB of RAM (0x8000_0000..0x1_0000_0000).
+    ram_limit: 0x1_0000_0000,
+    dma_limit: usize::MAX,
+    // The first bank below the first carve-out (0x8580_0000), less the kernel: right on a phone
+    // whose tree is unreadable.
+    ram_fallback: (0x8000_0000, 64 << 20),
+    virtio: None,
+    fwcfg: None,
+    periph: None,
+    psci_default_smc: true,
+};
+
+/// The Pixel 2 code on qemu `virt` (feature `msm-virt-test`): qemu's addresses, with the PL011 kept
+/// so a test can read the log, and fw_cfg for ramfb (the screen).
+pub const MSM8998_VIRT: Platform = Platform {
+    name: "Pixel 2 build on qemu virt (test)",
+    dtb_compatible: "linux,dummy-virt",
+    uart_base: 0x0900_0000,
+    uart_irq: 32 + 1,
+    gicd: 0x0800_0000,
+    gicc: 0x0801_0000,
+    device: &[(0, 0x4000_0000)],
+    boot_map: [Block::Device, Block::Ram, Block::None, Block::None],
+    ram_limit: usize::MAX,
+    dma_limit: usize::MAX,
+    ram_fallback: (0x4000_0000, 512 << 20),
+    virtio: None,
+    fwcfg: Some(0x0902_0000),
+    periph: None,
+    psci_default_smc: false,
+};
+
 /// This build's board.
-pub const CURRENT: Platform = if cfg!(feature = "raspi") {
+pub const CURRENT: Platform = if cfg!(feature = "msm-virt-test") {
+    MSM8998_VIRT
+} else if cfg!(feature = "msm8998") {
+    MSM8998
+} else if cfg!(feature = "raspi") {
     RASPI4
 } else {
     VIRT
@@ -134,6 +188,42 @@ pub const CURRENT: Platform = if cfg!(feature = "raspi") {
 
 /// True on the Raspberry Pi 4 build.
 pub const RASPI: bool = cfg!(feature = "raspi");
+
+/// True on the Pixel 2 build (and its qemu test build).
+pub const MSM: bool = cfg!(feature = "msm8998");
+
+/// The screen is the only place a crash can be read (no serial cable): Raspberry Pi, Pixel 2.
+pub const SCREEN_ONLY: bool = RASPI || MSM;
+
+/// The board has no UART (the console writer then skips it).
+pub const NO_UART: bool = CURRENT.uart_base == 0;
+
+/// Does boot.S move the image to the address it is linked for when the bootloader loaded it
+/// somewhere else (a loader that does not honour the Image header's text_offset)? Only the Pixel 2
+/// builds: the bootloader's rules for where it puts an arm64 Image are not known for sure.
+pub const RELOCATE: bool = MSM;
+
+/// The `text_offset` the arm64 Image header (boot.S) states: the image's offset from the start of
+/// RAM, 0x80000 (kernel/build.rs: `MILK_TEXT_OFFSET`, which only the relocation test build sets
+/// to something else, so that qemu loads the image elsewhere than it is linked).
+pub const TEXT_OFFSET: u64 = parse_hex(env!("MILK_TEXT_OFFSET"));
+
+const fn parse_hex(s: &str) -> u64 {
+    let b = s.as_bytes();
+    let mut i = if b.len() > 2 && b[0] == b'0' && b[1] == b'x' { 2 } else { 0 };
+    let mut v = 0u64;
+    while i < b.len() {
+        let d = match b[i] {
+            c @ b'0'..=b'9' => c - b'0',
+            c @ b'a'..=b'f' => c - b'a' + 10,
+            c @ b'A'..=b'F' => c - b'A' + 10,
+            _ => 0,
+        };
+        v = v * 16 + d as u64;
+        i += 1;
+    }
+    v
+}
 
 /// A register of the BCM283x peripheral block (`offset` from the peripheral base, e.g.
 /// 0x20_1000 for UART0): its physical address. Only on boards that have the block.

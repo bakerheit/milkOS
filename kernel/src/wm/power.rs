@@ -76,7 +76,7 @@ impl Write for Fixed {
 pub fn panic_screen(info: &core::panic::PanicInfo) {
     // Other CPUs keep running: stop the compositor from painting over the card.
     super::FROZEN.store(true, core::sync::atomic::Ordering::SeqCst);
-    if crate::platform::RASPI {
+    if crate::platform::SCREEN_ONLY {
         // No serial cable on the Pi: the end of the log (the panic message is in it) on a
         // full-screen text console, then the LED.
         crate::crashscreen::show();

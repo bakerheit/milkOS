@@ -20,6 +20,20 @@ const TAIL_BYTES: usize = 12 * 1024;
 pub fn show() -> bool {
     // Keep the compositor from painting over the text.
     crate::wm::FROZEN.store(true, core::sync::atomic::Ordering::SeqCst);
+    // The Pixel 2's screen is not this kernel's XRGB: its own console draws the log tail.
+    #[cfg(feature = "msm8998")]
+    {
+        crate::msm::fb::crash_screen(TAIL_BYTES)
+    }
+    #[cfg(not(feature = "msm8998"))]
+    {
+        show_generic()
+    }
+}
+
+/// The crash screen of the boards whose framebuffer is plain XRGB.
+#[cfg(not(feature = "msm8998"))]
+fn show_generic() -> bool {
     // The 3.5-inch SPI panel on the GPIO header, if there is one: the same text on its own console.
     #[cfg(feature = "raspi")]
     let lcd = show_on_lcd();

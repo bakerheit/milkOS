@@ -7,6 +7,10 @@ ENTRY(_start)
 KERNEL_PHYS = 0x40080000;
 KERNEL_BASE = 0xFFFF000000000000;
 
+/* For boot.S's relocation (Pixel 2 builds): the physical address the image is linked for, and how
+   many bytes of it a loader brings (everything before .bss). */
+__load_phys = KERNEL_PHYS;
+
 SECTIONS
 {
     . = KERNEL_BASE + KERNEL_PHYS;
@@ -44,6 +48,7 @@ SECTIONS
     __stack_top = .;
     __kernel_end = .;
     __image_size = __kernel_end - __kernel_start;
+    __copy_len = __bss_start - __kernel_start;
 
     /DISCARD/ : { *(.comment) *(.eh_frame*) }
 }

@@ -76,6 +76,13 @@ pub fn init() {
     let dtb = unsafe { Dtb::from_addr(boot_dtb_ptr()) };
     let mut tree = [MemRange { base: 0, size: 0 }; MAX_BANKS];
     let ntree = dtb.as_ref().map_or(0, |d| d.memory(&mut tree));
+    // The Pixel 2: what the secure world, the modem and the DSPs own is not ours to map, not even
+    // to read; the tree's reserved regions come out of the RAM list (msm/mem.rs).
+    #[cfg(feature = "msm8998")]
+    let ntree = match &dtb {
+        Some(d) => crate::msm::mem::carve_tree(d, &mut tree, ntree),
+        None => ntree,
+    };
     let (banks, nbanks, source) = ram_banks(&tree[..ntree], kstart);
     let primary = banks[..nbanks]
         .iter()
@@ -123,6 +130,9 @@ pub fn init() {
     if let Some(d) = &dtb {
         pmm::reserve(mmu::virt_to_phys(d.base()), d.total_size());
     }
+    // The bootloader's framebuffer is RAM we map but must not hand out.
+    #[cfg(feature = "msm8998")]
+    crate::msm::fb::reserve_frames();
     heap::init();
 
     let s = pmm::stats();

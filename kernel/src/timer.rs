@@ -239,6 +239,26 @@ pub fn init_cpu() {
     reprogram();
 }
 
+/// Start the clock without the interrupt tick (no GIC set up yet, or none to use): `now_ns`,
+/// `counter` and `frequency` work, nothing is hooked. The Pixel 2's stage 1 polls the counter.
+/// If `CNTFRQ_EL0` is zero the Snapdragon's 19.2 MHz is assumed. Returns the frequency used.
+#[cfg(feature = "msm8998")]
+pub fn init_polled() -> u64 {
+    let mut f = read_cntfrq();
+    if f == 0 {
+        f = 19_200_000;
+    }
+    FREQ.store(f, Ordering::Relaxed);
+    BOOT_COUNT.store(counter(), Ordering::Relaxed);
+    f
+}
+
+/// The raw value of `CNTFRQ_EL0` (what the firmware said, 0 if it said nothing).
+#[cfg(feature = "msm8998")]
+pub fn cntfrq_raw() -> u64 {
+    read_cntfrq()
+}
+
 /// Set up the clock, hook the timer PPI and start the 100 Hz tick. The GIC must already be
 /// initialised; IRQs still have to be unmasked by the caller.
 pub fn init() {

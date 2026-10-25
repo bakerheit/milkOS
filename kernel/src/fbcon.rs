@@ -43,6 +43,10 @@ pub struct Console {
     /// that changed. Reading video memory (scrolling does) is very slow on a board where it is not
     /// cacheable, writing it is not, so the console reads and writes RAM and only writes the screen.
     shown: Option<Surface<'static>>,
+    /// Instead of `shown`: a function that sends rows of the shadow to a screen whose pixels are not
+    /// this kernel's XRGB (the Pixel 2's framebuffer: msm/fb.rs).
+    #[cfg(feature = "msm8998")]
+    present: Option<fn(&Surface<'static>, usize, usize)>,
     /// Pixel rows `[lo, hi)` changed since the last flush.
     dirty: Option<(usize, usize)>,
     /// Pixel rows `[lo, hi)` copied to `shown` by flushes since [`take_flushed`](Console::take_flushed): what the screen
@@ -84,6 +88,8 @@ impl Console {
         let mut c = Console {
             surface,
             shown: None,
+            #[cfg(feature = "msm8998")]
+            present: None,
             dirty: None,
             flushed: None,
             scale,
@@ -117,6 +123,30 @@ impl Console {
         c
     }
 
+    /// A console drawn on `shadow` whose changed rows `[lo, hi)` are handed to `present` by
+    /// [`flush`](Self::flush) (the screen has another pixel format or stride than `shadow`).
+    #[cfg(feature = "msm8998")]
+    pub fn with_present(
+        shadow: Surface<'static>,
+        scale: usize,
+        present: fn(&Surface<'static>, usize, usize),
+    ) -> Self {
+        let mut c = Self::with_scale(shadow, scale);
+        c.present = Some(present);
+        c.mark(0, c.surface.height());
+        c.flush();
+        c
+    }
+
+    /// Draw directly on the shadow surface (a band across the top, say): `f` gets it, rows
+    /// `[lo, hi)` are marked changed and flushed.
+    #[cfg(feature = "msm8998")]
+    pub fn paint(&mut self, lo: usize, hi: usize, f: impl FnOnce(&mut Surface<'static>)) {
+        f(&mut self.surface);
+        self.mark(lo, hi);
+        self.flush();
+    }
+
     pub fn size(&self) -> (usize, usize) {
         (self.cols, self.rows)
     }
@@ -147,6 +177,10 @@ impl Console {
     /// Does this console draw in a RAM shadow and copy to `shown` ([`with_shadow`](Self::with_shadow))?
     #[cfg_attr(not(feature = "raspi"), allow(dead_code))]
     pub fn has_shadow(&self) -> bool {
+        #[cfg(feature = "msm8998")]
+        if self.present.is_some() {
+            return true;
+        }
         self.shown.is_some()
     }
 
@@ -158,6 +192,22 @@ impl Console {
 
     /// Copy the rows that changed to the screen (a no-op without a shadow).
     pub fn flush(&mut self) {
+        #[cfg(feature = "msm8998")]
+        if let Some(present) = self.present {
+            let Some((lo, hi)) = self.dirty.take() else {
+                return;
+            };
+            let h = self.surface.height();
+            let (lo, hi) = (lo.min(h), hi.min(h));
+            if hi > lo {
+                present(&self.surface, lo, hi);
+                self.flushed = Some(match self.flushed {
+                    Some((a, b)) => (a.min(lo), b.max(hi)),
+                    None => (lo, hi),
+                });
+            }
+            return;
+        }
         if self.shown.is_none() {
             return;
         }

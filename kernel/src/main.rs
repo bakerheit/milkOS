@@ -1,5 +1,7 @@
 #![no_std]
 #![no_main]
+// The Pixel 2 build (stage 1) runs a small part of the kernel: the rest is compiled but not used yet.
+#![cfg_attr(feature = "msm8998", allow(dead_code, unused_imports, unreachable_code, unused_variables))]
 
 extern crate alloc;
 
@@ -30,6 +32,8 @@ mod klog;
 mod mem;
 mod memtest;
 mod mmu;
+#[cfg(feature = "msm8998")]
+mod msm;
 mod net;
 mod pci;
 mod percpu;
@@ -101,6 +105,16 @@ pub fn console_writer() -> impl Write {
     sink::Sink
 }
 
+/// The Pixel 2, stage 1: vectors, then the experiment (msm/stage1.rs). It never returns.
+#[cfg(feature = "msm8998")]
+#[unsafe(no_mangle)]
+pub extern "C" fn kmain() -> ! {
+    // Vectors first, so a fault anywhere after this gets a crash dump.
+    exceptions::init();
+    msm::stage1::run()
+}
+
+#[cfg(not(feature = "msm8998"))]
 #[unsafe(no_mangle)]
 pub extern "C" fn kmain() -> ! {
     // Vectors first, so a fault anywhere after this gets a crash dump.

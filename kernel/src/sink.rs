@@ -179,6 +179,13 @@ pub fn install_screen(console: Console) {
     SCREEN.busy.store(false, Ordering::Release);
 }
 
+/// Run `f` on the screen console if there is one and it is free, and show what it changed (the
+/// Pixel 2's liveness band). Never waits.
+#[cfg(feature = "msm8998")]
+pub fn paint(f: impl FnOnce(&mut Console)) {
+    with_screen(f);
+}
+
 /// Stop mirroring to the screen (the desktop is about to own the framebuffer). The console's
 /// state is dropped; the text is still in the kernel log.
 pub fn remove_screen() {

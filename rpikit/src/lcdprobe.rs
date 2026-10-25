@@ -60,16 +60,19 @@ pub const PINS_22_27: Option<(u8, u8)> = Some((22, 27));
 pub const PINS_25_24: Option<(u8, u8)> = Some((25, 24));
 pub const PINS_23_24: Option<(u8, u8)> = Some((23, 24));
 
-/// Candidate set-ups, in the order they are shown. First every controller at the slow clock, SPI mode 0
-/// and the default pins; then the likeliest ones at 16 and 32 MHz; then SPI mode 3 (slow) for the likeliest
-/// three; then, as a second round, the other common D/C and reset pairs for the two likeliest
-/// controllers (slow, mode 0). `milk.lcd_probe_pins=0` stops after the first part.
-pub const SETUPS: [Setup; 21] = [
-    st(Ili9486, MHZ4, 0, None),
-    st(Ili9486P, MHZ4, 0, None),
-    st(Ili9486P18, MHZ4, 0, None),
-    st(Ili9488, MHZ4, 0, None),
+/// Candidate set-ups, in the order they are shown. First the likeliest for the common 4-inch kits
+/// (the Waveshare 4inch RPi LCD (A) style: ST7796S, plain 8-bit SPI, 480x320, D/C GPIO 24, reset 25):
+/// `st7796` at 4 and 16 MHz, then `ili9488`, `ili9486p` and `ili9486` at 4 MHz; then every other controller
+/// at the slow clock, SPI mode 0 and the default pins; then the other fast clocks; then SPI mode 3 (slow)
+/// for the likeliest three; then, as a second round, the other common D/C and reset pairs for the two
+/// likeliest 3.5-inch controllers (slow, mode 0). `milk.lcd_probe_pins=0` stops after the first part.
+pub const SETUPS: [Setup; 22] = [
     st(St7796, MHZ4, 0, None),
+    st(St7796, MHZ16, 0, None),
+    st(Ili9488, MHZ4, 0, None),
+    st(Ili9486P, MHZ4, 0, None),
+    st(Ili9486, MHZ4, 0, None),
+    st(Ili9486P18, MHZ4, 0, None),
     st(Ili9481, MHZ4, 0, None),
     st(R61581, MHZ4, 0, None),
     st(Hx8357, MHZ4, 0, None),
@@ -89,7 +92,7 @@ pub const SETUPS: [Setup; 21] = [
 ];
 
 /// How many set-ups run when the pin sweeps are off (`milk.lcd_probe_pins=0`): all but the pin round.
-pub const SETUPS_WITHOUT_PIN_ROUND: usize = 17;
+pub const SETUPS_WITHOUT_PIN_ROUND: usize = 18;
 
 /// Every set-up is shown in this rotation: landscape (the card fills the whole addressed area, so
 /// whichever way the glass is mounted something shows; the readable orientation is for the winner to fix

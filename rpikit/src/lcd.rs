@@ -420,6 +420,9 @@ pub trait Bus {
     /// Drive the reset line.
     fn reset_pin(&mut self, high: bool);
     fn delay_ms(&mut self, ms: u32);
+    /// The longest the next `write` may take, in microseconds, whatever the wire time says (the
+    /// budget wrapper of `lcdbudget` sets it before each write; a bus without time-outs ignores it).
+    fn set_cap_us(&mut self, _us: u64) {}
 }
 
 /// Where pixels come from when a rectangle is drawn.

@@ -3,6 +3,16 @@
 ## Unreleased
 
 **Raspberry Pi 4** (docs/raspberry-pi.md)
+- The 3.5-inch display can no longer hold up the boot or the SD boot log (a `milk.lcd=probe` boot showed "long pulse, one pulse, then nothing" for 100 s
+  and the log stayed blank: the probe ran synchronously before everything else). `milk.lcd=probe` now only notes itself at the start of the boot and runs
+  last, on its own low-priority thread, once the boot is over (LED solid on, desktop up) and the boot log is saved to the card (or 8 s after the boot is over if
+  there is no log file); the ACT LED keeps showing the boot status meanwhile, and the probe's waits sleep so the log writer and the desktop keep the CPU. The
+  normal `milk.lcd=ili9486` bring-up stays early and synchronous but is held to a budget of 1.5 s in all (reset, init sequence, first full picture, each SPI
+  transfer cut off at what is left; `milk.lcd_budget_ms=` changes it): past it the log says `lcd: gave up after N ms at step X` and the boot goes on without
+  the panel. The print path never waits for the panel: at most 3 ms per `kprintln!`, one send per 20 ms, the rest dropped and counted
+  (`lcd: N panel update(s) from the log were dropped so far`), and nothing at all once the panel's thread runs. Time-budget logic (`rpikit::lcdbudget`) is
+  host tested with a fake clock, including a stalled bus; the new `pi-lcd-late-test` boots with the probe and checks the boot reaches the desktop, the LED
+  stages and the saved log before the probe's first set-up, and boots with a budget that cannot be met.
 - The kernel saves its boot log into a file on the SD card, for a board with no serial cable and no working screen: put the blank `MILKLOG.TXT`
   (`scripts/pi-bootdir.sh` or `scripts/pi-logfile.sh` makes it) on the FAT boot partition, boot, wait for the ACT LED's "log saved" signal (two blinks and a
   pause), read it on the Mac with `scripts/pi-readlog.sh`. The kernel never creates a file or changes the FAT or a directory: it overwrites the data sectors of
@@ -23,16 +33,16 @@
   takes under 90 s. `scripts/led-decode.py` turns the typed digits (or a phone video's measured pulses) into the values, and with the
   kernel ELF into the function and source line; its tests are `led-decode-test`, the pattern's are in `rpikit::ledcrash` (host
   tests: round trips with jitter), and `pi-qemu-test` boot 5 decodes the cycle from the GPIO pin while the kernel crashes.
-- `milk.lcd=probe` is much wider, for a 3.5-inch kit nobody can identify (the first version showed nothing on a real board): 21 set-ups in about
-  95 s (controller x SPI mode x clock x D/C and reset pins) instead of 6. New controllers, each a `milk.lcd=NAME` of its own: `ili9486p` and
+- `milk.lcd=probe` is much wider, for a 3.5-inch kit nobody can identify (the first version showed nothing on a real board): 22 set-ups in about
+  100 s (controller x SPI mode x clock x D/C and reset pins) instead of 6. New controllers, each a `milk.lcd=NAME` of its own: `ili9486p` and
   `ili9486p18` (the ILI9486 on plain 8-bit SPI with RGB565 or 18-bit pixels: the "35B/35C" and MPI3501 wiring), `ili9481`, `r61581`, `hx8357`,
   `ili9341` and `st7789` (240x320 memory: drawn in a 320x240 area), next to `ili9486`, `ili9488`, `st7796`; new `milk.lcd_spi_mode=0..3`.
-  Order: every controller at 4 MHz first, the likeliest at 16 and 32 MHz, SPI mode 3, then (the pin sweep) other D/C and reset pairs
+  Order: the common 4-inch kits' chip first (`st7796` at 4 and at 16 MHz, then `ili9488`, `ili9486p`, `ili9486`), then every other controller at 4 MHz, the likeliest at 16 and 32 MHz, SPI mode 3, then (the pin sweep) other D/C and reset pairs
   (22/27, 25/24) for the two likeliest; GPIO 18 and 27 are driven high as a backlight switch while probing. `milk.lcd_probe_pins=0` turns the
   pin sweeps off; `milk.lcd_probe_from=n` starts at set-up n; `milk.lcd_probe_ms=` is the text card's hold (default 1 s). Each set-up shows a
   **number card** (its number, huge, 1 s), then **four full-screen colour flashes** (red, green, blue, white, 0.4 s each; a slow clock covers
-  the rows that fit), then the **text card** (name, options, `SETUP n OF 21`, bars), so a person who sees only a colour change can still say
-  which set-up it was. Every step logs `lcd: probe n/21 name ...` (clock divider, the kHz it makes of the core clock and where the core
+  the rows that fit), then the **text card** (name, options, `SETUP n OF 22`, bars), so a person who sees only a colour change can still say
+  which set-up it was. Every step logs `lcd: probe n/22 name ...` (clock divider, the kHz it makes of the core clock and where the core
   clock came from, how long the set-up took, the measured bit rate). Without a firmware answer for the core clock the SPI divider now
   assumes 500 MHz, the Pi 4's `core_freq` default, and says so; SPI transfer time-outs allow six times the wire time. Host-tested against the
   panel model (`rpikit::lcdprobe`, ten controller models, 18-bit pixel packing, option parsing, the matrix and its duration bound);

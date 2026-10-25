@@ -110,6 +110,11 @@ fn spi_write(off: usize, v: u32) {
 /// its fallback: the Pi 4's `core_freq` default, see `lcd::FALLBACK_CORE_HZ`).
 static CORE_HZ: AtomicU32 = AtomicU32::new(500_000_000);
 
+/// The core clock the dividers were computed from, Hz.
+pub fn core_hz() -> u32 {
+    CORE_HZ.load(Ordering::Relaxed)
+}
+
 pub fn set_core_hz(hz: u32) {
     CORE_HZ.store(hz.max(1_000_000), Ordering::Relaxed);
 }
@@ -163,12 +168,19 @@ pub fn transfer(cs: u8, cdiv: u32, tx: &[u8], rx: Option<&mut [u8]>) -> bool {
 /// False if the controller did not finish within a generous multiple (six times: the core clock
 /// may be running below the rate the divider was computed from) of the time the bytes need on the
 /// wire.
-pub fn transfer_mode(
+pub fn transfer_mode(cs: u8, cdiv: u32, mode: u8, tx: &[u8], rx: Option<&mut [u8]>) -> bool {
+    transfer_capped(cs, cdiv, mode, tx, rx, u64::MAX)
+}
+
+/// [`transfer_mode`] that never waits longer than `cap_us` microseconds, whatever the wire time
+/// says (a caller with a time budget of its own: the early display bring-up, the print path).
+pub fn transfer_capped(
     cs: u8,
     cdiv: u32,
     mode: u8,
     tx: &[u8],
     mut rx: Option<&mut [u8]>,
+    cap_us: u64,
 ) -> bool {
     let n = tx.len();
     if n == 0 {
@@ -180,7 +192,7 @@ pub fn transfer_mode(
         return false;
     }
     let wire_us = n as u64 * 8 * cdiv as u64 * 1_000_000 / CORE_HZ.load(Ordering::Relaxed) as u64;
-    let deadline = Timeout::us(2000 + 6 * wire_us);
+    let deadline = Timeout::us((2000 + 6 * wire_us).min(cap_us));
     let cs_bits = (cs & 3) as u32 | mode_bits(mode);
     spi_write(CLK, cdiv & 0xffff);
     spi_write(CS, cs_bits | CS_CLEAR_TX | CS_CLEAR_RX);

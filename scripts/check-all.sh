@@ -99,6 +99,7 @@ TESTS=(
   "pi-log-multiboot-test|q|900|par|scripts/pi-log-multiboot-test.sh"
   "highmem-test|q|600|par|scripts/highmem-test.sh"
   "usb-test|q|600|par|scripts/usb-test.sh"
+  "usb-hub-test|q|600|par|scripts/usb-hub-test.sh"
   "net-test|s|600|par|scripts/net-test.sh"
   "web-test|q|600|par|scripts/web-test.sh @WORK@"
   "pkg-test|s|600|par|scripts/pkg-test.sh"

@@ -2,13 +2,15 @@
 //! polled, behind PCI(e). On qemu virt the controller is `-device qemu-xhci` on the generic PCI
 //! host bridge; on the Raspberry Pi 4 it is the VL805 behind the BCM2711's PCIe root complex
 //! (`rpi/pcie.rs`). Everything above the registers is the same code, so it is tested on qemu
-//! (`scripts/usb-test.sh`: keys and pointer moves typed through qemu's `usb-kbd` / `usb-mouse`).
+//! (`scripts/usb-test.sh`: keys and pointer moves typed through qemu's `usb-kbd` / `usb-mouse`;
+//! `scripts/usb-hub-test.sh`: the same behind a `usb-hub`, nested hubs, hot plug).
 //!
-//! * [`xhci`]: the controller (rings, slots, enumeration of root ports).
+//! * [`xhci`]: the controller (rings, slots, enumeration of root ports), and hubs (`xhci/hub.rs`: the Pi 4's
+//!   sockets are behind one inside the VL805).
 //! * [`hid`]: boot keyboards and mice feeding `crate::input`.
 //!
-//! Not yet: hubs (a keyboard behind a hub), interrupts (a thread polls the event ring every few
-//! milliseconds), mass storage, report-protocol devices (only what a BIOS would drive), LEDs.
+//! Not yet: interrupts (a thread polls the event ring every few milliseconds), SuperSpeed hubs, mass storage,
+//! report-protocol devices (only what a BIOS would drive), LEDs.
 //! Everything a device sends is checked (descriptor lengths, report sizes); every wait on the
 //! controller is bounded.
 

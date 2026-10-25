@@ -224,6 +224,33 @@ pub const fn link(next: u64, toggle: bool, cycle: bool) -> Trb {
     }
 }
 
+/// Reset Endpoint command: take a halted endpoint (after a stall or an error) out of the halted state.
+pub const fn reset_endpoint(slot: u8, dci: u8, cycle: bool) -> Trb {
+    Trb {
+        param: 0,
+        status: 0,
+        control: ctl(
+            trb_type::RESET_ENDPOINT,
+            (slot as u32) << 24 | (dci as u32 & 0x1f) << 16,
+            cycle,
+        ),
+    }
+}
+
+/// Set TR Dequeue Pointer command: restart the endpoint's transfer ring at physical address `ptr` (16-byte
+/// aligned) with the dequeue cycle state `dcs`.
+pub const fn set_tr_dequeue(ptr: u64, dcs: bool, slot: u8, dci: u8, cycle: bool) -> Trb {
+    Trb {
+        param: (ptr & !0xf) | dcs as u64,
+        status: 0,
+        control: ctl(
+            trb_type::SET_TR_DEQUEUE,
+            (slot as u32) << 24 | (dci as u32 & 0x1f) << 16,
+            cycle,
+        ),
+    }
+}
+
 pub const fn noop_command(cycle: bool) -> Trb {
     Trb {
         param: 0,
@@ -481,6 +508,8 @@ pub fn fill_interrupt_in(ep: &mut [u32], max_packet: u16, interval: u8, ring: u6
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DeviceDesc {
     pub class: u8,
+    pub subclass: u8,
+    pub protocol: u8,
     pub max_packet0: u8,
     pub vendor: u16,
     pub product: u16,
@@ -504,6 +533,8 @@ pub fn parse_device(d: &[u8]) -> Option<DeviceDesc> {
     };
     Some(DeviceDesc {
         class: d[4],
+        subclass: d[5],
+        protocol: d[6],
         max_packet0: d[7],
         vendor,
         product,

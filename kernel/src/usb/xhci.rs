@@ -10,16 +10,26 @@
 //! Every poll is bounded ([`Timeout`]); a controller that stops answering ends the operation with an
 //! error, and a device that sends garbage is dropped. Devices are looked after in [`Controller::poll`],
 //! which the USB thread calls every few milliseconds.
+//!
+//! Hubs (USB 2, up to three tiers deep) are in [`hub`]: a hub on a root port, or on another hub's port, is
+//! addressed like any device, then its ports are powered and polled with GetPortStatus, and what is plugged
+//! in is addressed through it (route string, parent hub and translator in the slot context). The Raspberry
+//! Pi 4's four sockets are behind such a hub, inside the VL805.
 
+use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::ptr::{read_volatile, write_volatile};
 
 use rpikit::usb::{self as u, Event, Trb, code, portsc, speed};
+use rpikit::usbhub as hubp;
 
 use super::hid::Hid;
 use crate::dma::Buffer;
 use crate::kprintln;
 use crate::timeout::Timeout;
+
+mod hub;
 
 const TRBS: usize = 256;
 const TRB_BYTES: usize = 16;
@@ -126,7 +136,21 @@ impl EventRing {
 /// One enumerated device.
 struct Slot {
     id: u8,
+    /// The root port it hangs off (directly, or through hubs).
     port: u8,
+    /// Where it is, for the log: `1` on root port 1, `1.3` on port 3 of the hub on root port 1, `1.3.2` ...
+    path: String,
+    /// The slot id of the hub it is on (0: a root port).
+    parent: u8,
+    /// Hubs between it and the root port.
+    depth: u8,
+    route: u32,
+    speed: u8,
+    /// The high speed hub (slot id, port) whose translator serves it, for a low or full speed device.
+    tt: Option<(u8, u8)>,
+    /// Hub fields of its slot context (ports, multi-TT, think time code), if it is a hub.
+    hub_ctx: Option<(u8, bool, u8)>,
+    hub: Option<hub::Hub>,
     out_ctx: Buffer,
     in_ctx: Buffer,
     ep0: Ring,
@@ -197,6 +221,23 @@ enum Error {
     Failed(u8),
     NoMemory,
     Device(&'static str),
+    /// A device that works but is nothing we drive (already logged).
+    Ignored,
+}
+
+/// Where a device is being attached.
+pub(super) struct Attach {
+    root_port: u8,
+    parent: u8,
+    route: u32,
+    depth: u8,
+    speed: u8,
+    tt: Option<(u8, u8)>,
+    path: String,
+}
+
+pub(super) fn now_ms() -> u64 {
+    crate::timer::now_ns() / 1_000_000
 }
 
 impl Controller {
@@ -374,10 +415,16 @@ impl Controller {
         Ok((code, slot))
     }
 
-    /// A control transfer on the default endpoint of slot index `si`. `data` = the buffer's
-    /// (offset in the slot's buffer, length) when the request has a data stage. Returns the bytes
-    /// received for an IN request.
+    /// A control transfer on the default endpoint of slot index `si`, 1 s to finish. The data stage (if any)
+    /// uses the slot's buffer. Returns the bytes received for an IN request.
     fn control(&mut self, si: usize, s: u::Setup) -> Result<usize, Error> {
+        self.control_t(si, s, 1000)
+    }
+
+    /// A control transfer that must finish within `ms`. An error completion (a stall, a transaction error) halts the
+    /// endpoint; it is reset and its ring restarted here, so the next transfer to the device can work. A timeout leaves
+    /// the endpoint as it is: the caller drops the device.
+    fn control_t(&mut self, si: usize, s: u::Setup, ms: u64) -> Result<usize, Error> {
         let slot = self
             .slots
             .get_mut(si)
@@ -395,7 +442,9 @@ impl Controller {
         }
         let status_pa = slot.ep0.push(u::status_stage(len == 0 || !s.is_in(), true));
         self.ring_slot(id, 1);
-        let t = Timeout::ms(1000);
+        // Bytes the data stage did not move (it ended short): its own event says so, before the status stage's.
+        let mut short = 0u32;
+        let t = Timeout::ms(ms);
         loop {
             while let Some(ev) = self.events.next() {
                 self.event_done();
@@ -405,17 +454,18 @@ impl Controller {
                         code,
                         residual,
                         slot: sid,
-                        ..
-                    } if trb == status_pa && sid == id => {
-                        let slot = &self.slots[si];
-                        slot.buf.sync(0, len as usize);
-                        return match code {
-                            code::SUCCESS | code::SHORT_PACKET => {
-                                Ok((len as usize).saturating_sub(residual as usize))
-                            }
-                            c => Err(Error::Failed(c)),
-                        };
-                    }
+                        dci: 1,
+                    } if sid == id => match code {
+                        code::SUCCESS | code::SHORT_PACKET if trb == status_pa => {
+                            self.slots[si].buf.sync(0, len as usize);
+                            return Ok((len as usize).saturating_sub(short as usize));
+                        }
+                        code::SUCCESS | code::SHORT_PACKET => short = residual,
+                        c => {
+                            self.recover_ep0(si);
+                            return Err(Error::Failed(c));
+                        }
+                    },
                     other => self.stash(other),
                 }
             }
@@ -425,6 +475,17 @@ impl Controller {
         }
     }
 
+    /// The default endpoint of slot index `si` halted: Reset Endpoint, then restart the ring after whatever was queued. (Reset
+    /// Endpoint answers with an error if the endpoint was not halted after all: harmless.)
+    fn recover_ep0(&mut self, si: usize) {
+        let (id, pa, cycle) = {
+            let s = &self.slots[si];
+            (s.id, s.ep0.pa() + (s.ep0.enq * TRB_BYTES) as u64, s.ep0.cycle)
+        };
+        let _ = self.command(u::reset_endpoint(id, 1, true));
+        let _ = self.command(u::set_tr_dequeue(pa, cycle, id, 1, true));
+    }
+
     /// Write `words` into `buf` starting at dword `at`.
     fn put(&self, buf: &Buffer, at: usize, words: &[u32]) {
         for (i, w) in words.iter().enumerate() {
@@ -432,7 +493,7 @@ impl Controller {
         }
     }
 
-    /// Reset the port, wait for it to be enabled, return its speed.
+    /// Reset a root port, wait for it to be enabled, return its speed.
     fn reset_port(&self, port: u8) -> Option<u8> {
         let a = self.portsc_addr(port);
         let v = rd32(a);
@@ -460,11 +521,40 @@ impl Controller {
         Some(portsc::speed(v))
     }
 
-    /// Bring up the device on `port`: slot, address, descriptors, and its HID boot interfaces.
+    /// The device on root port `port`: reset it, then bring it up (a hub gets its ports polled, a keyboard or mouse its reports).
     fn enumerate(&mut self, port: u8) -> Result<(), Error> {
         let spd = self
             .reset_port(port)
             .ok_or(Error::Device("port reset failed"))?;
+        self.enumerate_device(Attach {
+            root_port: port,
+            parent: 0,
+            route: 0,
+            depth: 0,
+            speed: spd,
+            tt: None,
+            path: format!("{port}"),
+        })
+        .map(|_| ())
+    }
+
+    /// The slot context of slot index `si` as it stands, with `entries` endpoint contexts in use.
+    fn slot_params(&self, si: usize, entries: u8) -> hubp::SlotParams {
+        let s = &self.slots[si];
+        hubp::SlotParams {
+            route: s.route,
+            speed: s.speed,
+            entries,
+            root_port: s.port,
+            hub: s.hub_ctx,
+            tt: s.tt,
+        }
+    }
+
+    /// Bring up the device at `a` (its port is reset and enabled): slot, address, descriptors; then, if it is a hub, its
+    /// ports ([`hub`]), or its HID boot interfaces. Returns the slot id. On an error the slot is freed again.
+    fn enumerate_device(&mut self, a: Attach) -> Result<u8, Error> {
+        let spd = a.speed;
         if !matches!(spd, speed::LOW | speed::FULL | speed::HIGH | speed::SUPER) {
             return Err(Error::Device("unknown port speed"));
         }
@@ -472,20 +562,39 @@ impl Controller {
         if id == 0 || id as usize > MAX_SLOTS {
             return Err(Error::Device("bad slot id"));
         }
+        let path = a.path.clone();
+        let (Some(out_ctx), Some(in_ctx), Some(ep0), Some(buf)) =
+            (Buffer::new(1, 1), Buffer::new(1, 1), Ring::new(), Buffer::new(1, 1))
+        else {
+            // (The slot the controller handed out goes back.)
+            let _ = self.command(u::disable_slot(id, true));
+            return Err(Error::NoMemory);
+        };
         let slot = Slot {
             id,
-            port,
-            out_ctx: Buffer::new(1, 1).ok_or(Error::NoMemory)?,
-            in_ctx: Buffer::new(1, 1).ok_or(Error::NoMemory)?,
-            ep0: Ring::new().ok_or(Error::NoMemory)?,
-            buf: Buffer::new(1, 1).ok_or(Error::NoMemory)?,
+            port: a.root_port,
+            path: a.path,
+            parent: a.parent,
+            depth: a.depth,
+            route: a.route,
+            speed: spd,
+            tt: a.tt,
+            hub_ctx: None,
+            hub: None,
+            out_ctx,
+            in_ctx,
+            ep0,
+            buf,
             hid: Vec::new(),
         };
         // Address Device: slot context + EP0, the device context pointer.
         let mut mps = u::default_max_packet0(spd);
         self.put(&slot.in_ctx, 0, &[0, 0b11]);
+        self.slots.push(slot);
+        let si = self.slots.len() - 1;
         let mut sl = [0u32; 8];
-        u::fill_slot(&mut sl, spd, 1, port);
+        hubp::fill_slot_full(&mut sl, &self.slot_params(si, 1));
+        let slot = &self.slots[si];
         self.put(&slot.in_ctx, u::input_slot_offset(self.csz), &sl);
         let mut e0 = [0u32; 8];
         u::fill_ep0(&mut e0, mps, slot.ep0.pa());
@@ -494,30 +603,34 @@ impl Controller {
         self.dcbaa.write64(id as usize * 8, slot.out_ctx.pa());
         self.dcbaa.sync(0, 4096);
         let in_pa = slot.in_ctx.pa();
-        self.slots.push(slot);
-        let si = self.slots.len() - 1;
-        let cleanup = |c: &mut Controller, e: Error| -> Result<(), Error> {
-            let _ = c.command(u::disable_slot(id, true));
-            c.dcbaa.write64(id as usize * 8, 0);
-            c.dcbaa.sync(0, 4096);
-            c.slots.retain(|s| s.id != id);
-            Err(e)
-        };
         if let Err(e) = self.command(u::address_device(in_pa, id, false, true)) {
-            return cleanup(self, e);
+            return self.abort_slot(id, e);
         }
-        // The first 8 bytes of the device descriptor say the real control packet size.
-        let first = match self.control(si, u::req::get_descriptor(u::req::DESC_DEVICE, 0, 8)) {
-            Ok(n) if n >= 8 => {
-                let mut d = [0u8; 8];
-                self.slots[si].buf.read_bytes(0, &mut d);
-                u::parse_device(&d)
+        // The first 8 bytes of the device descriptor say the real control packet size. A device that is slow to wake
+        // (a keyboard behind a hub just after its port reset) gets three tries, 100 ms apart, when it answers with an error.
+        let mut first = None;
+        let mut last = Error::Device("no device descriptor");
+        for attempt in 0..3 {
+            if attempt > 0 {
+                crate::sched::sleep_ms(100);
             }
-            Ok(_) => None,
-            Err(e) => return cleanup(self, e),
-        };
+            match self.control(si, u::req::get_descriptor(u::req::DESC_DEVICE, 0, 8)) {
+                Ok(n) if n >= 8 => {
+                    let mut d = [0u8; 8];
+                    self.slots[si].buf.read_bytes(0, &mut d);
+                    first = u::parse_device(&d);
+                    if first.is_some() {
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                // Nothing came back at all: the endpoint is stuck mid-transfer, there is no trying again.
+                Err(Error::Timeout) => return self.abort_slot(id, Error::Timeout),
+                Err(e) => last = e,
+            }
+        }
         let Some(first) = first else {
-            return cleanup(self, Error::Device("no device descriptor"));
+            return self.abort_slot(id, last);
         };
         let real = if spd == speed::SUPER {
             1u16 << first.max_packet0.min(15)
@@ -535,12 +648,12 @@ impl Controller {
             slot.in_ctx.sync(0, 4096);
             let in_pa = slot.in_ctx.pa();
             if let Err(e) = self.command(u::evaluate_context(in_pa, id, true)) {
-                return cleanup(self, e);
+                return self.abort_slot(id, e);
             }
         }
         let n = match self.control(si, u::req::get_descriptor(u::req::DESC_DEVICE, 0, 18)) {
             Ok(n) => n,
-            Err(e) => return cleanup(self, e),
+            Err(e) => return self.abort_slot(id, e),
         };
         let mut d = [0u8; 18];
         self.slots[si].buf.read_bytes(0, &mut d[..n.min(18)]);
@@ -548,7 +661,7 @@ impl Controller {
         // The configuration: its header first (the total length), then all of it.
         let nh = match self.control(si, u::req::get_descriptor(u::req::DESC_CONFIG, 0, 9)) {
             Ok(n) => n,
-            Err(e) => return cleanup(self, e),
+            Err(e) => return self.abort_slot(id, e),
         };
         let mut head = [0u8; 9];
         self.slots[si].buf.read_bytes(0, &mut head[..nh.min(9)]);
@@ -556,14 +669,23 @@ impl Controller {
             .unwrap_or(0)
             .min(1024);
         if total < 9 {
-            return cleanup(self, Error::Device("no configuration descriptor"));
+            return self.abort_slot(id, Error::Device("no configuration descriptor"));
         }
         let nc = match self.control(si, u::req::get_descriptor(u::req::DESC_CONFIG, 0, total)) {
             Ok(n) => n,
-            Err(e) => return cleanup(self, e),
+            Err(e) => return self.abort_slot(id, e),
         };
         let mut cfg = alloc::vec![0u8; nc.min(1024)];
         self.slots[si].buf.read_bytes(0, &mut cfg);
+        let (vendor, product, class, protocol) =
+            dev.map_or((0, 0, 0, 0), |d| (d.vendor, d.product, d.class, d.protocol));
+        if class == hubp::CLASS_HUB {
+            let config = cfg.get(5).copied().unwrap_or(1);
+            return match self.setup_hub(si, vendor, product, protocol, config) {
+                Ok(()) => Ok(id),
+                Err(e) => self.abort_slot(id, e),
+            };
+        }
         let mut hids = [u::HidBoot {
             config: 0,
             interface: 0,
@@ -573,30 +695,29 @@ impl Controller {
             interval: 0,
         }; u::MAX_HID];
         let nh = u::find_hid_boot(&cfg, &mut hids);
-        let (vendor, product, class) = dev.map_or((0, 0, 0), |d| (d.vendor, d.product, d.class));
         if nh == 0 {
             kprintln!(
-                "[usb] port {port}: {vendor:04x}:{product:04x} class {class:#x} ({} speed): no keyboard or mouse interface, ignored",
+                "[usb] port {path}: {vendor:04x}:{product:04x} class {class:#x} ({} speed): no keyboard or mouse interface, ignored",
                 speed_name(spd)
             );
-            return cleanup(self, Error::Device("nothing we drive"));
+            return self.abort_slot(id, Error::Ignored);
         }
         if let Err(e) = self.control(si, u::req::set_configuration(hids[0].config)) {
-            return cleanup(self, e);
+            return self.abort_slot(id, e);
         }
         for h in &hids[..nh] {
-            if let Err(e) = self.start_hid(si, spd, h) {
+            if let Err(e) = self.start_hid(si, h) {
                 kprintln!(
-                    "[usb] port {port}: could not start interface {}: {e:?}",
+                    "[usb] port {path}: could not start interface {}: {e:?}",
                     h.interface
                 );
             }
         }
         if self.slots[si].hid.is_empty() {
-            return cleanup(self, Error::Device("no endpoint started"));
+            return self.abort_slot(id, Error::Device("no endpoint started"));
         }
         kprintln!(
-            "[usb] port {port}: {vendor:04x}:{product:04x} ({} speed), slot {id}: {}",
+            "[usb] port {path}: {} speed device {vendor:04x}:{product:04x}, slot {id}: {}",
             speed_name(spd),
             self.slots[si]
                 .hid
@@ -605,17 +726,23 @@ impl Controller {
                 .collect::<Vec<_>>()
                 .join(" + ")
         );
-        Ok(())
+        Ok(id)
+    }
+
+    /// Enumeration failed: free the slot again, hand the error on.
+    fn abort_slot<T>(&mut self, id: u8, e: Error) -> Result<T, Error> {
+        self.free_slot(id);
+        Err(e)
     }
 
     /// Configure the interrupt IN endpoint of a HID boot interface, put the device in boot protocol,
     /// and queue the first report transfer.
-    fn start_hid(&mut self, si: usize, spd: u8, h: &u::HidBoot) -> Result<(), Error> {
+    fn start_hid(&mut self, si: usize, h: &u::HidBoot) -> Result<(), Error> {
         let dci = u::dci(h.ep_addr);
         let ring = Ring::new().ok_or(Error::NoMemory)?;
         let report = Buffer::new(1, 1).ok_or(Error::NoMemory)?;
         let id = self.slots[si].id;
-        let port = self.slots[si].port;
+        let spd = self.slots[si].speed;
         let entries = self.slots[si]
             .hid
             .iter()
@@ -631,7 +758,7 @@ impl Controller {
             }
             self.put(&slot.in_ctx, 0, &[0, 1 | 1 << dci as u32]);
             let mut sl = [0u32; 8];
-            u::fill_slot(&mut sl, spd, entries, port);
+            hubp::fill_slot_full(&mut sl, &self.slot_params(si, entries));
             self.put(&slot.in_ctx, u::input_slot_offset(self.csz), &sl);
             let mut ep = [0u32; 8];
             u::fill_interrupt_in(
@@ -645,8 +772,17 @@ impl Controller {
         }
         let in_pa = self.slots[si].in_ctx.pa();
         self.command(u::configure_endpoint(in_pa, id, true))?;
-        // Boot protocol (a keyboard may refuse SET_IDLE: that is allowed).
-        self.control(si, u::req::hid_set_protocol(h.interface as u16, 0))?;
+        // Boot protocol (a keyboard may refuse SET_IDLE: that is allowed). A device that refuses SET_PROTOCOL
+        // (a stall) is taken to send boot reports already: it is a boot interface by its descriptor.
+        match self.control(si, u::req::hid_set_protocol(h.interface as u16, 0)) {
+            Ok(_) => {}
+            Err(Error::Failed(c)) => kprintln!(
+                "[usb] port {}: interface {} refused SET_PROTOCOL (code {c}): taken to send boot reports",
+                self.slots[si].path,
+                h.interface
+            ),
+            Err(e) => return Err(e),
+        }
         let _ = self.control(si, u::req::hid_set_idle(h.interface as u16));
         let mut ep = HidEndpoint {
             dci,
@@ -656,8 +792,15 @@ impl Controller {
             dev: Hid::new(h.kind),
         };
         arm(&mut ep);
+        let name = ep.dev.name();
         self.slots[si].hid.push(ep);
         self.ring_slot(id, dci);
+        kprintln!(
+            "[usb] port {}: hid {name} attached (interface {}, endpoint {:#04x}, boot protocol)",
+            self.slots[si].path,
+            h.interface,
+            h.ep_addr
+        );
         Ok(())
     }
 
@@ -707,7 +850,7 @@ impl Controller {
             if v & portsc::CHANGE_BITS != 0 {
                 wr32(a, portsc::write_clearing(v, v & portsc::CHANGE_BITS));
             }
-            let now = crate::timer::now_ns() / 1_000_000 + 1;
+            let now = now_ms() + 1;
             if !connected {
                 self.connected_since[idx] = 0;
             } else if self.connected_since[idx] == 0 {
@@ -715,14 +858,16 @@ impl Controller {
             }
             if connected && !self.attached[idx] && now - self.connected_since[idx] >= 100 {
                 self.attached[idx] = true;
-                if let Err(e) = self.enumerate(port) {
-                    kprintln!("[usb] port {port}: {e:?}");
+                match self.enumerate(port) {
+                    Ok(()) | Err(Error::Ignored) => {}
+                    Err(e) => kprintln!("[usb] port {port}: {e:?}"),
                 }
             } else if !connected && self.attached[idx] {
                 self.attached[idx] = false;
                 self.remove(port);
             }
         }
+        self.poll_hubs();
         for s in &mut self.slots {
             for e in &mut s.hid {
                 e.dev.tick();
@@ -730,20 +875,73 @@ impl Controller {
         }
     }
 
-    /// A device was unplugged: release its keys, free its slot.
+    /// The device on root port `port` was unplugged: free it, and whatever hangs off it.
     fn remove(&mut self, port: u8) {
-        let Some(i) = self.slots.iter().position(|s| s.port == port) else {
+        let Some(id) = self
+            .slots
+            .iter()
+            .find(|s| s.port == port && s.parent == 0)
+            .map(|s| s.id)
+        else {
             return;
         };
-        let id = self.slots[i].id;
+        self.remove_tree(id);
+    }
+
+    /// Free slot `id` and every device behind it (a hub's), the ones furthest away first.
+    fn remove_tree(&mut self, id: u8) {
+        let kids: Vec<u8> = self
+            .slots
+            .iter()
+            .filter(|s| s.parent == id)
+            .map(|s| s.id)
+            .collect();
+        for k in kids {
+            self.remove_tree(k);
+        }
+        let Some(i) = self.slots.iter().position(|s| s.id == id) else {
+            return;
+        };
         for e in &mut self.slots[i].hid {
             e.dev.unplugged();
         }
-        let _ = self.command(u::disable_slot(id, true));
-        self.dcbaa.write64(id as usize * 8, 0);
-        self.dcbaa.sync(0, 4096);
-        self.slots.remove(i);
-        kprintln!("[usb] port {port}: device removed");
+        let (path, was_hub) = (self.slots[i].path.clone(), self.slots[i].hub.is_some());
+        self.free_slot(id);
+        kprintln!(
+            "[usb] port {path}: {} removed",
+            if was_hub { "hub" } else { "device" }
+        );
+    }
+
+    /// Disable slot `id` and drop its memory. If the controller does not confirm, the memory is left allocated (it may
+    /// still read or write it).
+    fn free_slot(&mut self, id: u8) {
+        let Some(i) = self.slots.iter().position(|s| s.id == id) else {
+            return;
+        };
+        let ok = self.command(u::disable_slot(id, true)).is_ok();
+        let slot = self.slots.remove(i);
+        if slot.parent != 0
+            && let Some(h) = self
+                .slots
+                .iter_mut()
+                .find(|s| s.id == slot.parent)
+                .and_then(|s| s.hub.as_mut())
+        {
+            for p in h.ports.iter_mut().filter(|p| p.child == id) {
+                p.child = 0;
+            }
+        }
+        if ok {
+            self.dcbaa.write64(id as usize * 8, 0);
+            self.dcbaa.sync(0, 4096);
+        } else {
+            kprintln!(
+                "[usb] port {}: the controller did not confirm freeing slot {id}: its memory stays allocated",
+                slot.path
+            );
+            core::mem::forget(slot);
+        }
     }
 }
 

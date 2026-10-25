@@ -10,8 +10,8 @@
 # OUTDIR gets: milkos8.img (the kernel the firmware loads), config.milkos.txt and cmdline.milkos.txt
 # (what to put in config.txt / cmdline.txt, or use instead of them; cmdline.milkos.txt also turns on the
 # 3.5-inch SPI display, milk.lcd=ili9486: edit it on the card to change the options), and MILKLOG.TXT (the blank
-# 256 KiB file the kernel saves its boot log into: copy it to the card with the rest; scripts/pi-logfile.sh makes
-# it alone, scripts/pi-readlog.sh reads it back).
+# 8 MiB file the kernel writes its log into, every boot after the last: copy it to the card with the rest;
+# scripts/pi-logfile.sh makes it alone, in another size if you like, scripts/pi-readlog.sh reads it back).
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
@@ -42,6 +42,6 @@ CFG
 cat > "$OUT/cmdline.milkos.txt" <<'CMD'
 milk.fbscale=1 milk.lcd=ili9486
 CMD
-scripts/pi-logfile.sh "$OUT" 256 >/dev/null
+scripts/pi-logfile.sh "$OUT" 8M >/dev/null
 echo "pi-bootdir: $(ls -1 "$OUT" | tr '\n' ' ')in $OUT"
 ls -la "$OUT"

@@ -171,6 +171,8 @@ pub fn record(event: &str, detail: &str) {
 pub fn record_as(pid: u32, exe: &str, event: &str, detail: &str) {
     let mut detail = String::from(detail);
     detail.truncate(512);
+    #[cfg(feature = "raspi")]
+    let card_line;
     {
         let mut l = LOG.lock();
         let mut r = Rec {
@@ -185,6 +187,18 @@ pub fn record_as(pid: u32, exe: &str, event: &str, detail: &str) {
             persisted: false,
         };
         r.seal();
+        // Without the hash chain (two 64-digit fields): what happened, to whom, when.
+        #[cfg(feature = "raspi")]
+        {
+            card_line = alloc::format!(
+                "{} pid {} {} {} {}",
+                r.seq,
+                r.pid,
+                escape(&r.exe),
+                escape(&r.event),
+                escape(&r.detail)
+            );
+        }
         l.next_seq += 1;
         l.last = r.hash;
         l.total += 1;
@@ -196,6 +210,9 @@ pub fn record_as(pid: u32, exe: &str, event: &str, detail: &str) {
         }
         l.ring.push_back(r);
     }
+    // The SD card log gets the audit line too (rpi/logbuf.rs).
+    #[cfg(feature = "raspi")]
+    crate::rpi::logbuf::tagged("[audit]", &card_line);
     if THREAD.load(Ordering::Acquire) {
         KICK.store(true, Ordering::Release);
         WQ.wake_all();

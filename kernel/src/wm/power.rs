@@ -27,6 +27,8 @@ pub fn shut_down() {
     #[cfg(feature = "raspi")]
     {
         crate::kprintln!("wm: shutting down (power manager, halt)");
+        // The SD card log: this boot's end, everything on the card, before the power goes.
+        crate::rpi::logfile::shutdown_flush(false);
         crate::rpi::power::power_off();
     }
     #[cfg(not(feature = "raspi"))]
@@ -41,6 +43,7 @@ pub fn restart() {
     #[cfg(feature = "raspi")]
     {
         crate::kprintln!("wm: restarting (power manager, full reset)");
+        crate::rpi::logfile::shutdown_flush(true);
         crate::rpi::power::restart();
     }
     #[cfg(not(feature = "raspi"))]

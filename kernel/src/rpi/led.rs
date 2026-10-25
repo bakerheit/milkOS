@@ -7,10 +7,11 @@
 //!   Each burst is played by busy-waiting on the generic counter, so it needs no allocator,
 //!   timer interrupt or scheduler, and adds about 9 s to a whole boot (`milk.ledcodes=0` turns
 //!   the codes off; the `led: stage N name` log lines stay).
-//! * [`finish`]: the boot is done, solid on. If the boot log is going into a file on the card
-//!   (`logfile`) and everything logged has been saved with nothing new for two seconds, the LED shows the
-//!   **log saved** signal instead of solid on: two short blinks, then about a second of dark, over and over;
-//!   new log text brings the solid light back until it is saved again.
+//! * [`finish`]: the boot is done, solid on. If the log is going into a file on the card
+//!   (`logfile`) and everything logged has been saved with nothing new for two seconds (and the latest write worked), the
+//!   LED shows the **log saved** signal instead of solid on: two short blinks, then dark for the rest of the second, over and
+//!   over; new log text brings the solid light back until it is saved again. If the card log gave up after write errors,
+//!   the LED blinks slowly and evenly instead: 1 s on, 1 s off.
 //! * [`blink_forever`], from a crash: the crash cycle (`rpikit::ledcrash`): 2 s of fast flashing
 //!   (about 5 Hz), so "on" means "running" and "flashing" means "crashed" even when nothing reached
 //!   the screen, then the boot stage reached, the kind of crash, the faulting PC and address as
@@ -119,6 +120,11 @@ pub fn finish() {
 
 /// The boot is done and the LED is solid on (set by [`finish`]).
 static FINISHED: AtomicBool = AtomicBool::new(false);
+
+/// Is the boot over (the desktop is up, or there is none to wait for)?
+pub fn is_finished() -> bool {
+    FINISHED.load(Ordering::Acquire)
+}
 
 /// May the log writer show its "log saved" signal? Only once the boot is over, with no crash, and not
 /// when the codes are off (`milk.ledcodes=0`).

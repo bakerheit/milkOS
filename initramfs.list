@@ -46,6 +46,8 @@
 /Commands/users                                   target/user/aarch64-unknown-none-softfloat/release/users      4755
 /Commands/admin                                   target/user/aarch64-unknown-none-softfloat/release/admin      4755
 /Commands/clear                                   target/user/aarch64-unknown-none-softfloat/release/clear      755
+# logsync: save the SD card log now and say where it stands (Raspberry Pi; docs/raspberry-pi.md, "Reading the log").
+/Commands/logsync                                 target/user/aarch64-unknown-none-softfloat/release/logsync    755
 # Files and folders (files replaced mv cp touch rm mkdir ls ln chmod chown), and the Trash.
 /Commands/files                                   target/user/aarch64-unknown-none-softfloat/release/files      755
 /Commands/trash                                   target/user/aarch64-unknown-none-softfloat/release/trash      755

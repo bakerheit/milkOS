@@ -178,6 +178,8 @@ global_asm!(
 /// current kernel stack.
 extern "C" fn kstack_overflow(sp: u64, elr: u64, far: u64, esr: u64) -> ! {
     CRASHING.store(crate::percpu::id() + 1, Ordering::Relaxed);
+    #[cfg(feature = "raspi")]
+    crate::rpi::logbuf::emergency();
     let (tid, name) = crate::sched::current_for_crash();
     kprintln!("\n*** KERNEL STACK OVERFLOW ***");
     kprintln!("  thread {tid} ({name}), sp would be {sp:#018x}");
@@ -346,6 +348,9 @@ fn halt() -> ! {
 
 /// Print a crash dump for the trapped context and halt. Usable from any handler.
 pub fn crash(frame: &TrapFrame, vector: usize, what: &str) -> ! {
+    // The SD card log stops rate limiting: every line of the dump is kept.
+    #[cfg(feature = "raspi")]
+    crate::rpi::logbuf::emergency();
     let cpu = crate::percpu::id();
     // One full dump at a time. A fault while *this* CPU prints its dump is a real double
     // fault (bail out, don't recurse); another CPU crashing at the same moment (two CPUs

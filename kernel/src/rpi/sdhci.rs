@@ -405,7 +405,7 @@ impl Drop for HwGuard {
 
 // ---- the boot log writer's narrow path ----------------------------------------------------------
 //
-// `rpi::logfile` (the boot log in a file on the card's FAT partition) reads and writes sectors here, beside the
+// `rpi::logfile` (the log on the card's FAT partition) reads and writes sectors here, beside the
 // block device: it needs nothing the rest of the kernel provides (no allocator, no scheduler, no VFS, no
 // `milk.sdwrite=1`; that option protects /dev/mmcblk0 from ordinary writes, while this path is only ever asked by
 // the log writer, which proves each sector belongs to its log file before it asks). It works from the crash path,
@@ -415,6 +415,18 @@ static RAW_BASE: AtomicUsize = AtomicUsize::new(0);
 static RAW_HC: AtomicBool = AtomicBool::new(false);
 static RAW_BLOCKS: AtomicU64 = AtomicU64::new(0);
 static RAW_RCA: AtomicU32 = AtomicU32::new(0);
+static RAW_READS: AtomicU64 = AtomicU64::new(0);
+static RAW_WRITES: AtomicU64 = AtomicU64::new(0);
+static RAW_FAILS: AtomicU64 = AtomicU64::new(0);
+
+/// (read commands, write commands, failures) of the log writer's path since boot.
+pub fn raw_counters() -> (u64, u64, u64) {
+    (
+        RAW_READS.load(Ordering::Relaxed),
+        RAW_WRITES.load(Ordering::Relaxed),
+        RAW_FAILS.load(Ordering::Relaxed),
+    )
+}
 
 /// Sectors on the card the log writer can use, if a card was brought up.
 pub fn raw_blocks() -> Option<u64> {
@@ -431,6 +443,7 @@ fn raw_io(lba: u64, buf: Buf, crash: bool) -> bool {
         Buf::Write(b) => (b.len(), RAW_BLOCKS.load(Ordering::Relaxed)),
     };
     let n = (len / SECTOR) as u64;
+    let is_write = matches!(&buf, Buf::Write(_));
     if base == 0 || len == 0 || !len.is_multiple_of(SECTOR) || n > MAX_BLOCKS_PER_CMD as u64 {
         return false;
     }
@@ -468,9 +481,15 @@ fn raw_io(lba: u64, buf: Buf, crash: bool) -> bool {
     if crash {
         inner.host.recover(inner.card.rca);
     }
+    if is_write {
+        RAW_WRITES.fetch_add(1, Ordering::Relaxed);
+    } else {
+        RAW_READS.fetch_add(1, Ordering::Relaxed);
+    }
     let ok = match inner.rw(lba, buf) {
         Ok(()) => true,
         Err(f) => {
+            RAW_FAILS.fetch_add(1, Ordering::Relaxed);
             // The registers at the moment of failure (kprintln! gives up on the print lock after 20 ms, so this
             // is safe in a crash too).
             kprintln!("[sdhci] log path{}: lba {lba} x{n} failed: {f:?}", if crash { " (crash)" } else { "" });

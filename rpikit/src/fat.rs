@@ -1,5 +1,5 @@
-//! Finding one pre-created file on a FAT32 boot partition, for the boot log (`kernel/src/rpi/logfile.rs`,
-//! docs/raspberry-pi.md, "The boot log in a file").
+//! Finding one pre-created file on a FAT32 boot partition, for the SD card log (`kernel/src/rpi/logfile.rs`,
+//! docs/raspberry-pi.md, "Reading the log").
 //!
 //! The kernel never creates a file, never changes the FAT and never changes a directory: the person's Mac makes
 //! `MILKLOG.TXT` (scripts/pi-logfile.sh) and the kernel only overwrites the data sectors of that
@@ -23,8 +23,8 @@
 pub const SECTOR: usize = 512;
 /// Most runs of consecutive sectors a file may be split into.
 pub const MAX_EXTENTS: usize = 128;
-/// Largest log file taken (sectors): 4 MiB.
-pub const MAX_FILE_SECTORS: u32 = 8192;
+/// Largest log file taken (sectors): 32 MiB.
+pub const MAX_FILE_SECTORS: u32 = 65536;
 /// Smallest log file taken (bytes).
 pub const MIN_FILE_BYTES: u32 = 4096;
 /// The most directory sectors read while looking for the name.

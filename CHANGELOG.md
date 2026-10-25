@@ -3,6 +3,20 @@
 ## Unreleased
 
 **Raspberry Pi 4** (docs/raspberry-pi.md)
+- A present transform for an HDMI panel whose scaler distorts the picture ("A panel whose scaler distorts the picture" in docs/raspberry-pi.md). The real board is a portrait 480x800 glass behind
+  a scaler that takes only standard video modes (1024x768 at 60 Hz) and stretches that raster over the glass non-uniformly (x 0.469, y 1.04); the firmware's framebuffer does not stretch to the mode
+  (it centres another shape with black bars: a 768x1280 framebuffer was a thin strip in a photo). So the kernel now draws the desktop on a *logical* framebuffer (`milk.fbsize=WxH`, cached RAM) and converts every
+  changed region into the firmware's *physical* one (`milk.fbphys=PxQ` or `auto`, the video mode's raster), turned by `milk.fbrotate=0|90|180|270` (clockwise) and stretched to fill it completely, each physical pixel the
+  area-weighted average of the pixels under it (fixed point, weights adding to exactly 256, so flat colours stay exact). Only the rectangles that changed are redone; with none of the options nothing changes and nothing is
+  copied. The boot log console, crash screens (allocation-free, lock-free), sign-of-life band and the touch calibration all go through it; a Settings mode change is refused while it is on. The maths is pure
+  (`rpikit::fbpresent`: the plan, point and rectangle maps both ways, the resampler, the firmware's pillarbox, the option parsers), host-tested with a model of the panel (the desktop turned, stretched and
+  stretched back is within 1.5 grey levels on average), exact fills, no overflow, hostile sizes. New `milk.fbtest=1` draws a calibration pattern (border, corner markers, cross-hairs, diagonal, colour bars, a grid of squares)
+  instead of the desktop, to photograph a panel's geometry. `scripts/pi-bootdir.sh OUTDIR --display hdmi4inch-portrait` writes the recipe for that glass (`hdmi_mode=16`, `milk.fbsize=800x480 milk.fbphys=1024x768
+  milk.fbrotate=90 milk.touch=xpt2046`: an 800x480 desktop on its side, 1:1 on the glass) with the alternatives (270, an upright 640x1067 desktop, which the window system copes with, other modes) as comments, and the docs
+  say how to read a panel's shape from a photo. `milk.touch_cal=ask` draws four big crosses at logical positions (inset from the corners), logs every raw sample and every refused reading, reports the fit
+  in logical pixels with its error and starts over (three tries) when the touches disagree; the fit copes with any swap or flip of the touch chip's axes (host-tested for all eight). `pi-qemu-test` boots 31 to 37 compare qemu's
+  screendump of the pattern at 90 and 270 degrees with an independent floating point model (`scripts/fbpresent_check.py`, mean error 0.02 of 255, worst 0.8), and run the desktop, the calibration crosses, both crash screens and refused options through it.
+  Untested on the real panel: the board's actual stretch and filter, the direction `90` needs, a frame's cost on an A72 (the first one is timed in the boot log), the touch chip's axes.
 - HDMI displays, including the 4-inch 800x480 panel with an SPI touch chip ("HDMI displays" in docs/raspberry-pi.md). That panel is an HDMI input plus a touch
   chip on the header, not an SPI display (the SPI probe could only ever show its "no signal" screen). `scripts/pi-bootdir.sh OUTDIR --display hdmi800x480|auto` writes
   a `config.milkos.txt` with a clearly marked "this display" block (the standard 1024x768 mode a real panel accepted; the custom 800x480 timing, 720p, 800x600 and

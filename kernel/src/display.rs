@@ -47,7 +47,7 @@ static FRAMEBUFFER: SpinLock<Option<Surface<'static>>> = SpinLock::new(None);
 pub fn init() {
     #[cfg(feature = "raspi")]
     {
-        use crate::rpi::{fb, lcd};
+        use crate::rpi::{fb, lcd, present};
         // The panel on the GPIO header (if the command line asked for one and it came up) shows
         // the boot log first: it is the only screen a board without an HDMI cable has.
         lcd::boot_console();
@@ -58,18 +58,32 @@ pub fn init() {
             // milk.fbsize=; 1024x768 when it says nothing usable. A size the firmware refuses
             // falls back to 1024x768 too.
             let (w, h) = fb::choose_size();
-            fb::init(w, h).or_else(|| {
-                if (w, h) == (WIDTH, HEIGHT) {
-                    return None;
-                }
-                kprintln!("rpi fb: {w}x{h} did not work, trying {WIDTH}x{HEIGHT}");
-                fb::init(WIDTH, HEIGHT)
-            })
+            // milk.fbphys= / milk.fbrotate=: the firmware's framebuffer may be another size than the desktop's
+            // (rpi/present.rs); without them (rw, rh) is (w, h) and nothing else changes.
+            let want = present::wanted();
+            let (rw, rh) = present::raster(&want, (w, h));
+            fb::init(rw, rh)
+                .or_else(|| {
+                    if (rw, rh) == (WIDTH, HEIGHT) {
+                        return None;
+                    }
+                    kprintln!("rpi fb: {rw}x{rh} did not work, trying {WIDTH}x{HEIGHT}");
+                    fb::init(WIDTH, HEIGHT)
+                })
+                .map(|surface| {
+                    // What the firmware really gave is the physical raster; the desktop draws {w}x{h} if asked to convert.
+                    present::setup((w, h), fb::size(), &want).unwrap_or(surface)
+                })
         };
         if let Some(fb) = hdmi {
             BACKEND.store(RPIFB, Ordering::Release);
-            let (w, h) = fb::size();
-            return finish_init_boot_log(fb, "rpi mailbox framebuffer", w, h);
+            let (w, h) = size();
+            let name = if present::active() {
+                "rpi mailbox framebuffer (converted into the firmware raster)"
+            } else {
+                "rpi mailbox framebuffer"
+            };
+            return finish_init_boot_log(fb, name, w, h);
         }
         if lcd::ready()
             && let Some(fb) = lcd::primary_surface(WIDTH, HEIGHT)
@@ -166,7 +180,11 @@ fn finish_init_boot_log(fb: Surface<'static>, name: &str, w: usize, h: usize) {
     console.flush();
     sink::install_screen(console);
     #[cfg(feature = "raspi")]
-    crate::rpi::fb::band();
+    {
+        band();
+        // The whole picture to the glass (a no-op unless the present transform is in use).
+        sync();
+    }
     kprintln!(
         "display: {name} {w}x{h} XRGB8888, the boot log is on screen until the desktop starts"
     );
@@ -214,7 +232,7 @@ pub fn size() -> (usize, usize) {
     match backend() {
         GPU => gpu::framebuffer().map_or((WIDTH, HEIGHT), |(_, w, h)| (w, h)),
         #[cfg(feature = "raspi")]
-        RPIFB => crate::rpi::fb::size(),
+        RPIFB => crate::rpi::present::logical_size().unwrap_or_else(crate::rpi::fb::size),
         #[cfg(feature = "raspi")]
         LCDFB => crate::rpi::lcd::primary_size(),
         _ => ramfb::size(),
@@ -228,7 +246,7 @@ pub fn framebuffer() -> Option<*mut u32> {
         GPU => gpu::framebuffer().map(|(p, _, _)| p),
         RAMFB => ramfb::framebuffer(),
         #[cfg(feature = "raspi")]
-        RPIFB => crate::rpi::fb::framebuffer(),
+        RPIFB => crate::rpi::present::logical_framebuffer().or_else(crate::rpi::fb::framebuffer),
         #[cfg(feature = "raspi")]
         LCDFB => crate::rpi::lcd::primary_framebuffer(),
         _ => None,
@@ -242,6 +260,12 @@ pub fn set_mode(w: usize, h: usize) -> Option<Surface<'static>> {
     match backend() {
         GPU => gpu::set_mode(w, h),
         RAMFB => ramfb::set_mode(w, h),
+        #[cfg(feature = "raspi")]
+        RPIFB if crate::rpi::present::active() => {
+            // The logical size is the one the command line gave; the firmware's raster is not ours to change.
+            kprintln!("display: {w}x{h} refused: the desktop is presented through milk.fbphys/milk.fbrotate at a fixed size");
+            None
+        }
         #[cfg(feature = "raspi")]
         RPIFB => crate::rpi::fb::set_mode(w, h),
         #[cfg(feature = "raspi")]
@@ -262,6 +286,9 @@ pub fn present(rects: &[Rect]) {
     if backend() == GPU {
         gpu::present(rects);
     }
+    // The Pi's logical framebuffer goes to the firmware's raster, rotated and stretched (rpi/present.rs); a no-op without it.
+    #[cfg(feature = "raspi")]
+    crate::rpi::present::present(rects);
     // The SPI panel shows what the desktop drew, in its own time.
     #[cfg(feature = "raspi")]
     crate::rpi::lcd::note_source(rects);
@@ -276,7 +303,39 @@ pub fn sync() {
         gpu::wait();
     }
     #[cfg(feature = "raspi")]
-    crate::rpi::lcd::note_source_all();
+    {
+        crate::rpi::present::present_all();
+        crate::rpi::lcd::note_source_all();
+    }
+}
+
+/// [`sync`] for the pixel rows `[lo, hi)` only (a text console that knows which rows it changed).
+pub fn sync_rows(lo: usize, hi: usize) {
+    let (w, h) = size();
+    let (lo, hi) = (lo.min(h), hi.min(h));
+    if hi <= lo {
+        return;
+    }
+    let r = Rect::new(0, lo as i32, w as i32, (hi - lo) as i32);
+    if backend() == GPU {
+        gpu::present(&[r]);
+        gpu::wait();
+    }
+    #[cfg(feature = "raspi")]
+    {
+        crate::rpi::present::present(&[r]);
+        crate::rpi::lcd::note_source(&[r]);
+    }
+}
+
+/// The green sign-of-life band across the top of the screen (the boot console clears the screen when it starts).
+#[cfg(feature = "raspi")]
+fn band() {
+    if let Some(p) = framebuffer() {
+        let (w, h) = size();
+        crate::rpi::fb::sign_of_life(p as usize, w, h);
+        sync_rows(0, crate::rpi::fb::BAND_H);
+    }
 }
 
 /// Is the SPI panel the screen (there is no HDMI framebuffer)?
@@ -291,4 +350,7 @@ pub fn sync_panic() {
         let (w, h) = size();
         gpu::try_present(&[Rect::new(0, 0, w as i32, h as i32)]);
     }
+    // No lock, no allocation: the tables and buffers were made at start-up.
+    #[cfg(feature = "raspi")]
+    crate::rpi::present::present_all();
 }

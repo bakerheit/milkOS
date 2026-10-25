@@ -885,6 +885,57 @@ fn calibration_fit_recovers_the_map() {
 }
 
 #[test]
+fn calibration_fit_copes_with_swapped_and_flipped_axes() {
+    // The owner's glass is turned relative to the picture (milk.fbrotate=90 and the touch chip's axes do not
+    // have to follow): whatever the chip's X and Y mean, four touches on the four crosses give a map that is right
+    // everywhere. All eight ways round (swap or not, flip X, flip Y), on the logical sizes in use.
+    for (w, h) in [(800, 480), (480, 800), (1024, 768), (640, 1067)] {
+        let targets = touch::cal_targets(w, h);
+        for swap in [false, true] {
+            for flip_x in [false, true] {
+                for flip_y in [false, true] {
+                    // The chip's reading of a point of the screen: normalised position (0..1) turned the way this glass is.
+                    let raw_of = |sx: f64, sy: f64| -> (i32, i32) {
+                        let (mut u, mut v) = (sx / (w - 1) as f64, sy / (h - 1) as f64);
+                        if swap {
+                            std::mem::swap(&mut u, &mut v);
+                        }
+                        if flip_x {
+                            u = 1.0 - u;
+                        }
+                        if flip_y {
+                            v = 1.0 - v;
+                        }
+                        ((300.0 + u * 3600.0) as i32, (290.0 + v * 3500.0) as i32)
+                    };
+                    let raw: Vec<(i32, i32)> = targets.iter().map(|t| raw_of(t.0 as f64, t.1 as f64)).collect();
+                    let cal = touch::fit(&raw, &targets).unwrap_or_else(|| panic!("{w}x{h} swap={swap} fx={flip_x} fy={flip_y}: no fit"));
+                    assert!(touch::fit_error(&cal, &raw, &targets) <= 1);
+                    // And everywhere else on the glass: a grid of points, each within 2 pixels of where it really is.
+                    for gy in (0..h).step_by(37) {
+                        for gx in (0..w).step_by(41) {
+                            let r = raw_of(gx as f64, gy as f64);
+                            let p = cal.apply(r.0, r.1);
+                            assert!((p.0 - gx).abs() <= 3 && (p.1 - gy).abs() <= 3, "{w}x{h} swap={swap} fx={flip_x} fy={flip_y}: ({gx},{gy}) -> {p:?}");
+                        }
+                    }
+                    // The printed line parses back into the same map (what the owner copies into cmdline.txt).
+                    let mut buf = [0u8; 96];
+                    let n = cal.write(&mut buf);
+                    assert_eq!(Cal::parse(&buf[..n]), Some(cal));
+                }
+            }
+        }
+    }
+    // Touches that do not agree (two crosses touched in the wrong order) have a large error the helper can see.
+    let targets = touch::cal_targets(800, 480);
+    let raw = [(400, 400), (3800, 400), (400, 3800), (3800, 3800)]; // crosses 3 and 4 swapped
+    let cal = touch::fit(&raw, &targets).unwrap();
+    assert!(touch::fit_error(&cal, &raw, &targets) > 100);
+    assert_eq!(touch::fit_error(&cal, &[], &[]), 0);
+}
+
+#[test]
 fn tracker_makes_clicks_and_drags() {
     let mut t = Tracker::new();
     let p = |x, y| Some((x, y));

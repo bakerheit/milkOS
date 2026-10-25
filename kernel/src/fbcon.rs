@@ -45,6 +45,9 @@ pub struct Console {
     shown: Option<Surface<'static>>,
     /// Pixel rows `[lo, hi)` changed since the last flush.
     dirty: Option<(usize, usize)>,
+    /// Pixel rows `[lo, hi)` copied to `shown` by flushes since [`take_flushed`](Console::take_flushed): what the screen
+    /// still has to be told about (the present transform converts only these).
+    flushed: Option<(usize, usize)>,
     /// Glyph magnification: a cell is `GLYPH_W * scale` by `GLYPH_H * scale` pixels.
     scale: usize,
     cols: usize,
@@ -82,6 +85,7 @@ impl Console {
             surface,
             shown: None,
             dirty: None,
+            flushed: None,
             scale,
             cols,
             rows,
@@ -140,6 +144,18 @@ impl Console {
         (hi > lo).then_some((lo, hi))
     }
 
+    /// Does this console draw in a RAM shadow and copy to `shown` ([`with_shadow`](Self::with_shadow))?
+    #[cfg_attr(not(feature = "raspi"), allow(dead_code))]
+    pub fn has_shadow(&self) -> bool {
+        self.shown.is_some()
+    }
+
+    /// The pixel rows `[lo, hi)` flushed to the screen's buffer since the last call.
+    #[cfg_attr(not(feature = "raspi"), allow(dead_code))]
+    pub fn take_flushed(&mut self) -> Option<(usize, usize)> {
+        self.flushed.take()
+    }
+
     /// Copy the rows that changed to the screen (a no-op without a shadow).
     pub fn flush(&mut self) {
         if self.shown.is_none() {
@@ -162,6 +178,10 @@ impl Console {
                 w as i32,
                 (hi - lo) as i32,
             );
+            self.flushed = Some(match self.flushed {
+                Some((a, b)) => (a.min(lo), b.max(hi)),
+                None => (lo, hi),
+            });
         }
     }
 

@@ -4,7 +4,7 @@
 # that folder; it refuses a folder on a mounted volume or under /dev, so it cannot touch a card. Copying
 # the files onto the card is yours to do.
 #
-#   scripts/pi-bootdir.sh OUTDIR [--display hdmi800x480|auto]    a release build (smaller and faster than debug)
+#   scripts/pi-bootdir.sh OUTDIR [--display hdmi800x480|hdmi4inch-portrait|auto]    a release build (smaller and faster than debug)
 #   DEBUG=1 scripts/pi-bootdir.sh OUTDIR ...                     the debug profile
 #
 # --display says which screen the files are for (docs/raspberry-pi.md, "HDMI displays"):
@@ -15,6 +15,13 @@
 #                has a "this display" block that forces the standard 1024x768 mode (the panel's scaler shows it
 #                at 800x480), cmdline.milkos.txt asks for a 5:3 1280x768 framebuffer so the picture is not
 #                squashed and turns on the touch chip (milk.touch=xpt2046); no SPI panel driver.
+#   hdmi4inch-portrait  an HDMI scaler board driving a PORTRAIT 480x800 glass that takes only standard video modes
+#                (it refused a custom 800x480 timing; it takes hdmi_mode=16, 1024x768 at 60 Hz) and stretches that
+#                raster over the whole glass, non-uniformly. config.milkos.txt forces 1024x768; cmdline.milkos.txt
+#                draws an 800x480 desktop, turns it 90 degrees (milk.fbrotate=90: turn the panel on its side to
+#                read it) and has the kernel itself stretch it into the 1024x768 raster the panel then stretches back
+#                (milk.fbsize=800x480 milk.fbphys=1024x768 milk.fbrotate=90, "HDMI displays" in docs/raspberry-pi.md);
+#                the touch chip is on (milk.touch=xpt2046). The files list the other orientations as comments.
 #
 # OUTDIR gets: milkos8.img (the kernel the firmware loads), config.milkos.txt and cmdline.milkos.txt
 # (what to put in config.txt / cmdline.txt, or use instead of them: edit them on the card to change the
@@ -25,12 +32,12 @@
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
-USAGE="usage: scripts/pi-bootdir.sh OUTDIR [--display hdmi800x480|auto]"
+USAGE="usage: scripts/pi-bootdir.sh OUTDIR [--display hdmi800x480|hdmi4inch-portrait|auto]"
 OUT=""
 DISPLAY_KIND=auto
 while [ $# -gt 0 ]; do
   case "$1" in
-    --display) [ $# -ge 2 ] || { echo "pi-bootdir: --display needs a value (hdmi800x480 or auto). $USAGE" >&2; exit 2; }; DISPLAY_KIND="$2"; shift 2 ;;
+    --display) [ $# -ge 2 ] || { echo "pi-bootdir: --display needs a value (hdmi800x480, hdmi4inch-portrait or auto). $USAGE" >&2; exit 2; }; DISPLAY_KIND="$2"; shift 2 ;;
     --display=*) DISPLAY_KIND="${1#--display=}"; shift ;;
     -h|--help) echo "$USAGE"; exit 0 ;;
     -*) echo "pi-bootdir: unknown option $1. $USAGE" >&2; exit 2 ;;
@@ -39,8 +46,8 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$OUT" ] || { echo "$USAGE" >&2; exit 2; }
 case "$DISPLAY_KIND" in
-  auto|hdmi800x480) ;;
-  *) echo "pi-bootdir: --display must be hdmi800x480 or auto, not '$DISPLAY_KIND'" >&2; exit 2 ;;
+  auto|hdmi800x480|hdmi4inch-portrait) ;;
+  *) echo "pi-bootdir: --display must be hdmi800x480, hdmi4inch-portrait or auto, not '$DISPLAY_KIND'" >&2; exit 2 ;;
 esac
 case "$(cd "$(dirname "$OUT")" 2>/dev/null && pwd -P)/$(basename "$OUT")" in
   /Volumes/*|/dev/*) echo "pi-bootdir: refusing $OUT: it is on a mounted volume or under /dev (write to a scratch folder, copy to the card yourself)" >&2; exit 2 ;;
@@ -129,8 +136,68 @@ hdmi_drive=2
 # ==============================================================================================================
 CFG
 fi
+if [ "$DISPLAY_KIND" = hdmi4inch-portrait ]; then
+  cat >> "$OUT/config.milkos.txt" <<'CFG'
+
+# ============ this display: an HDMI scaler board on a PORTRAIT 480x800 glass (4-inch class) ============
+# The board takes only standard video modes (a custom 800x480 timing was answered with "Not Support" on the board's own
+# screen) and stretches whatever raster it gets over the whole glass, NON-uniformly: 1024 across becomes 480 (x 0.469) and 768
+# down becomes 800 (x 1.04). The firmware's own framebuffer is not stretched to the mode: a framebuffer of another shape
+# is centred with black bars. So the kernel makes the framebuffer exactly the raster (1024x768) and does the stretching
+# itself with the inverse of the board's (cmdline.txt: milk.fbsize / milk.fbphys / milk.fbrotate). Turn the panel on
+# its side to read the desktop: with milk.fbrotate=90 its top edge is the glass's right edge (use 270 if that is the
+# wrong side). docs/raspberry-pi.md, "HDMI displays", says how to read a panel's shape from a photo.
+hdmi_group=2
+# 2 = the "computer monitor" (DMT) family of modes.
+hdmi_mode=16
+# 16 = 1024x768 at 60 Hz (DMT), the mode this board accepts.
+hdmi_drive=2
+# 2 = HDMI with audio (1 = plain DVI signal, no audio over the link).
+
+# ---- other modes to try if the board says "Not Support" or shows nothing (remove the # of ONE group of lines and comment
+# ---- out the three mode lines above). The raster changes with the mode: say so in cmdline.txt with milk.fbphys=WxH, or
+# ---- milk.fbphys=auto (the size the firmware reports). The desktop stays 800x480 either way.
+# 720p (1280x720; cmdline: milk.fbphys=1280x720):
+#hdmi_group=1
+#hdmi_mode=4
+#hdmi_drive=2
+# 800x600 at 60 Hz (cmdline: milk.fbphys=800x600):
+#hdmi_group=2
+#hdmi_mode=9
+#hdmi_drive=2
+# 640x480 at 60 Hz (cmdline: milk.fbphys=640x480):
+#hdmi_group=1
+#hdmi_mode=1
+#hdmi_drive=2
+
+# ---- cmdline.txt alternatives (one line there; swap the three milk.fb* words for ONE of these sets) ----
+# This file's choice, the desktop on its side, 1:1 on the glass:    milk.fbsize=800x480 milk.fbphys=1024x768 milk.fbrotate=90
+# The other side of the panel:                                     milk.fbsize=800x480 milk.fbphys=1024x768 milk.fbrotate=270
+# An upright portrait desktop (640 wide, 1067 tall = the glass's 3:5 shape, shown at 0.75 scale: text is small but readable;
+# the window system copes, a window or two is cut at the edge):    milk.fbsize=640x1067 milk.fbphys=1024x768 milk.fbrotate=0
+#   (480x800 itself is below the smallest framebuffer the desktop accepts, 640x400.)
+# A test card to photograph the geometry instead of the desktop:    add milk.fbtest=1 (white border, red/green/blue/yellow
+#   corner markers clockwise from the picture's top left, cross-hairs, a diagonal, colour bars, an 80 px grid whose squares
+#   must look square).
+# Touch that is turned or mirrored against the picture:             add milk.touch_cal=ask (four crosses, then the line to keep)
+
+# ---- picture problems (remove the # of ONE line) ----
+# Flicker, dropouts, a blank or "no signal" panel with a cable that is long or poor: a stronger signal (1..11, the default is 5):
+#config_hdmi_boost=7
+# ... or refuse any mode with a pixel clock above 40 MHz so the firmware picks a gentler one:
+#hdmi_pixel_freq_limit=40000000
+# ==============================================================================================================
+CFG
+fi
 # ---- cmdline.milkos.txt: one line (the firmware reads cmdline.txt as one line) ----
-if [ "$DISPLAY_KIND" = hdmi800x480 ]; then
+if [ "$DISPLAY_KIND" = hdmi4inch-portrait ]; then
+  # A portrait glass behind a scaler that stretches 1024x768 over it: the desktop is 800x480, turned 90 degrees, stretched by the kernel into
+  # the 1024x768 raster (milk.fbphys) the firmware's mode has. The panel is then turned on its side (docs/raspberry-pi.md, "HDMI displays").
+  # milk.touch=xpt2046: the touch chip on SPI0 (no milk.lcd: that is the SPI panel driver); its map is in the desktop's own 800x480 pixels.
+  cat > "$OUT/cmdline.milkos.txt" <<'CMD'
+milk.fbscale=1 milk.fbsize=800x480 milk.fbphys=1024x768 milk.fbrotate=90 milk.touch=xpt2046
+CMD
+elif [ "$DISPLAY_KIND" = hdmi800x480 ]; then
   # milk.touch=xpt2046 reads the panel's touch chip on SPI0 (docs/raspberry-pi.md, "HDMI displays"). No milk.lcd: that is the driver
   # for SPI panels, and this panel is not one; with it nothing on the header's display pins is touched. milk.fbsize=1280x768 is the
   # panel's own shape (5:3) at a size the desktop is made for: the firmware shows it in the 1024x768 mode of config.milkos.txt (the

@@ -144,7 +144,7 @@ pub const BAND_H: usize = 6;
 
 /// A solid band across the top of the screen (bright green, `0x0000ff40` is not it: the pixel
 /// word is `0x00RRGGBB`), plus a white pixel row under it: "the kernel got a framebuffer".
-fn sign_of_life(va: usize, w: usize, h: usize) {
+pub fn sign_of_life(va: usize, w: usize, h: usize) {
     let band = BAND_H.min(h);
     for y in 0..band {
         let row = (va + y * w * 4) as *mut u32;
@@ -158,14 +158,6 @@ fn sign_of_life(va: usize, w: usize, h: usize) {
                 })
             };
         }
-    }
-}
-
-/// Redraw the band (the boot console clears the screen when it starts).
-pub fn band() {
-    if let Some(p) = framebuffer() {
-        let (w, h) = size();
-        sign_of_life(p as usize, w, h);
     }
 }
 

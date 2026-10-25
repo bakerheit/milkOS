@@ -5,6 +5,7 @@
 //! * [`mailbox`]: the VideoCore property mailbox (framebuffer, clocks, power, board info).
 //! * [`led`]: the ACT LED as a sign of life (on while running, flashing after a crash).
 //! * [`fb`]: the display, a framebuffer the firmware allocates through the mailbox.
+//! * [`present`]: the present transform (`milk.fbphys=`, `milk.fbrotate=`): the desktop's logical framebuffer rotated and stretched into the firmware's raster, for a panel whose scaler distorts the picture.
 //! * [`sdhci`]: the SD host controller (EMMC2 on a real board; qemu's raspi4b has the EMMC1
 //!   one), as a block device.
 //! * [`genet`]: the Gigabit Ethernet MAC. Not modelled by qemu, so untested until hardware.
@@ -27,6 +28,7 @@ pub mod logfile;
 pub mod logreport;
 pub mod mailbox;
 pub mod pcie;
+pub mod present;
 pub mod power;
 pub mod rng;
 pub mod sdhci;

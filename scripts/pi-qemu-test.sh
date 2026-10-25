@@ -28,6 +28,8 @@
 #           screen as before); 11: bad option values are refused and the defaults used; 12: an unknown controller; 14, 15: `milk.lcd=probe` (every candidate set-up shows its number card, colour flashes and text card, then the boot goes on; 15: its own options).
 #           What qemu cannot show: whether any pixel reaches a glass (the host tests of rpikit's panel model prove the
 #           byte stream; the real board is the test of the wiring).
+#   boots 31 to 37: the present transform (milk.fbphys / milk.fbrotate / milk.fbtest): a calibration pattern turned 90 and 270 degrees and stretched into the
+#           firmware's raster, compared with scripts/fbpresent_check.py's model; the desktop, the touch calibration crosses and both crash screens through it; bad options refused.
 #   boots 20 to 25: the framebuffer's size (milk.fbsize=800x480 / 1280x768 / auto / refused / 1920x1080: the log lines, a screendump of the right size, the
 #           boot console and crash screen at 800x480) and the touch chip with no SPI panel (milk.touch=xpt2046: pins logged, late start, no invented events).
 #   boots 16 to 19: the exception dump (docs/raspberry-pi.md, "Reading a crash"): `milk.crashtest=serror` runs a fake SError (qemu cannot raise a real
@@ -161,6 +163,7 @@ check '^serror: checkpoints and write breadcrumbs on' "the SError checkpoints ar
 COST=$(tr -d '\r' < "$LOG" | sed -n -E 's/^serror: a checkpoint costs ([0-9]+) ns .*/\1/p' | head -1)
 [ -n "$COST" ] && [ "$COST" -lt 20000 ] && ok "a checkpoint costs $COST ns (under qemu's TCG)" || bad "checkpoint cost missing or too high: '$COST'"
 has '\*\*\* KERNEL EXCEPTION' && bad "an exception dump in a normal boot" || ok "no exception dump: every checkpoint passed"
+has '^present: ' && bad "boot 1: the present transform said something with no milk.fbphys / milk.fbrotate" || ok "boot 1: no present transform (the firmware's buffer is the desktop's, no extra copy)"
 out system | grep -Eq '^CPUs +4' && ok "system says 4 CPUs" || bad "system: $(out system)"
 out system | grep -Eq '^memory +[0-9]+ MB' && ok "system: $(out system | grep '^memory')" || bad "system has no memory line"
 out disks | grep -q 'milkfs.*/Volumes/Milk' && ok "disks lists the card's milkfs" || bad "disks: $(out disks)"
@@ -566,6 +569,118 @@ check '^\[watchdog\] armed \(simulated\)' "boot 30: armed"
 check '^crash-test: CPU 0 now stops with interrupts off' "boot 30: the kernel is hung on purpose"
 check '^\[watchdog\] simulated: no kick for 4 s: the board is reset now' "boot 30: no kick came; another CPU saw the missed deadline"
 [ "$(tr -d '\r' < "$LOG" | grep -ac 'booting\.\.\.')" -ge 2 ] && ok "boot 30: the frozen board was reset and the kernel booted a second time" || bad "boot 30: no second boot after the hang"
+
+# ---- boots 31 to 37: the present transform (docs/raspberry-pi.md, "HDMI displays"): milk.fbsize is the desktop's logical size, milk.fbphys the
+# firmware's raster, milk.fbrotate turns the picture clockwise, and the kernel converts every changed region into the firmware's buffer
+# (rpi/present.rs; the model and its tests are rpikit::fbpresent). `milk.fbtest=1` fills the logical screen with a calibration pattern instead of
+# starting the desktop; scripts/fbpresent_check.py draws the same pattern in floating point and compares the screendump with it. ----
+FBT="milk.ledcodes=0"
+DTB_ARGS=(-dtb "$T/fb.dtb")
+model_check() { # DUMP.png LOGICAL PHYS ROTATE what: the dump equals the model's turn and stretch of the pattern
+  local r
+  if r=$(python3 -I scripts/fbpresent_check.py "$1" --logical "$2" --phys "$3" --rotate "$4" --tol 3 2>&1); then
+    ok "$5: $(echo "$r" | head -1 | cut -c1-120)"
+  else
+    bad "$5: the screendump differs from the model: $(echo "$r" | tail -2 | tr '\n' ' ')"
+  fi
+}
+# boot 31: the owner's panel recipe: an 800x480 desktop, turned 90 degrees, stretched into the 1024x768 raster.
+python3 scripts/pi_dtb.py "$T/fb.dtb" --cmdline "milk.fbsize=800x480 milk.fbphys=1024x768 milk.fbrotate=90 milk.fbtest=1 $FBT"
+boot 31 "wait@300:present: fbtest pattern 800x480 is on the screen"
+sleep 1
+python3 scripts/qmp.py "$QMP" screendump "$T/pres90.png" >/dev/null 2>&1 || true
+stop
+check '^rpi fb: 1024x768x32 pitch 4096 at ' "boot 31: the firmware's framebuffer is the 1024x768 raster"
+check '^present: logical 800x480 -> rotate 90 clockwise -> 480x800 -> stretch \(x 2\.133, y 0\.960\) -> firmware raster 1024x768$' "boot 31: the mapping is logged"
+check '^present: logical corners \(0,0\) -> \(1022,0\), \(799,0\) -> \(1022,767\), \(799,479\) -> \(1,767\), \(0,479\) -> \(1,0\)$' "boot 31: the corners map where the model says (the top left goes to the top right)"
+check '^present: area-weighted filter, up to 2 taps across and 2 down, tables 1792 entries, logical buffer 1500 KiB; a full 1024x768 frame took [0-9]+ us' "boot 31: the filter, its tables and the cost of a frame are logged"
+check '^display: rpi mailbox framebuffer \(converted into the firmware raster\) 800x480 XRGB8888' "boot 31: the screen the desktop sees is 800x480"
+has 'KERNEL PANIC|kernel panic' && bad "boot 31: a panic" || ok "boot 31: no panic"
+if [ -s "$T/pres90.png" ]; then model_check "$T/pres90.png" 800x480 1024x768 90 "boot 31"; else bad "boot 31: no screendump"; fi
+# boot 32: the other way round (270), the raster from the firmware (qemu says 640x480): milk.fbphys=auto.
+python3 scripts/pi_dtb.py "$T/fb.dtb" --cmdline "milk.fbsize=800x480 milk.fbphys=auto milk.fbrotate=270 milk.fbtest=1 $FBT"
+boot 32 "wait@300:present: fbtest pattern 800x480 is on the screen"
+sleep 1
+python3 scripts/qmp.py "$QMP" screendump "$T/pres270.png" >/dev/null 2>&1 || true
+stop
+check "^present: milk\.fbphys=auto: raster 640x480: the firmware.s display mode" "boot 32: milk.fbphys=auto takes the firmware's display size"
+check '^present: logical 800x480 -> rotate 270 clockwise -> 480x800 -> stretch \(x 1\.333, y 0\.600\) -> firmware raster 640x480$' "boot 32: the mapping is logged"
+check '^rpi fb: 640x480x32 pitch 2560 at ' "boot 32: the firmware's framebuffer is 640x480"
+if [ -s "$T/pres270.png" ]; then model_check "$T/pres270.png" 800x480 640x480 270 "boot 32"; else bad "boot 32: no screendump"; fi
+# boot 33: the desktop through the transform, with the touch chip on (and the touch map in logical pixels).
+python3 scripts/pi_dtb.py "$T/fb.dtb" --cmdline "milk.fbsize=800x480 milk.fbphys=1024x768 milk.fbrotate=90 milk.touch=xpt2046 $FBT"
+boot 33 "wait@300:wm: desktop up" "wait@300:touch: running" "send:system" "wait:$P" "send:text show /proc/input" "wait:$P"
+python3 scripts/qmp.py "$QMP" screendump "$T/presdesk.png" >/dev/null 2>&1 || true
+stop
+check '^present: logical 800x480 -> rotate 90 clockwise' "boot 33: the desktop runs through the transform"
+check '^touch: running, map raw -> 800x480 pixels \(default\)' "boot 33: the touch map is in logical pixels"
+has 'KERNEL PANIC|kernel panic' && bad "boot 33: a panic" || ok "boot 33: no panic"
+out system | grep -Eq '^CPUs +4' && ok "boot 33: the system runs" || bad "boot 33: system: $(out system)"
+desktop_shot "$T/presdesk.png" 1024 768 && ok "boot 33: the screendump is a 1024x768 picture with a desktop's worth of colours" || bad "boot 33: the screen is blank or flat ($(dsize "$T/presdesk.png"))"
+# boot 34: touch calibration (milk.touch_cal=ask) through the transform: the first cross is at logical (32,32), near the raster's top right.
+python3 scripts/pi_dtb.py "$T/fb.dtb" --cmdline "milk.fbsize=800x480 milk.fbphys=1024x768 milk.fbrotate=90 milk.touch=xpt2046 milk.touch_cal=ask $FBT"
+boot 34 "wait@300:touch: attempt 1, cross 1 of 4 at logical"
+sleep 2
+python3 scripts/qmp.py "$QMP" screendump "$T/prescal.png" >/dev/null 2>&1 || true
+stop
+check '^touch: calibration \(milk\.touch_cal=ask\) on the 800x480 logical screen: crosses at \(32,32\) \(767,32\) \(767,447\) \(32,447\)' "boot 34: the four crosses are at logical positions, inset from the corners"
+check '^touch: attempt 1, cross 1 of 4 at logical \(32,32\)' "boot 34: the first cross is asked for"
+if [ -s "$T/prescal.png" ]; then
+  # Logical (32,32) is the rotated pixel (479-32, 32) = (447, 32): physical x = (2*447+1)*1024/(2*480) = 954, y = (2*32+1)*768/(2*800) = 31.
+  case "$(pixels "$T/prescal.png" 954,31 954,6 20,20)" in
+    "242,210,126 242,210,126 22,21,19") ok "boot 34: the bright cross is where the model puts logical (32,32), the background is dark" ;;
+    *) bad "boot 34: no cross where the model says: $(pixels "$T/prescal.png" 954,31 954,6 20,20)" ;;
+  esac
+  # The other three crosses are dim, in their own corners: logical (767,32) -> (954,736); (767,447) -> (69,736); (32,447) -> (69,31).
+  case "$(pixels "$T/prescal.png" 954,736 69,736 69,31)" in
+    "90,87,80 90,87,80 90,87,80") ok "boot 34: the other three crosses are dim, in the other three corners" ;;
+    *) bad "boot 34: the other crosses are not where the model says: $(pixels "$T/prescal.png" 954,736 69,736 69,31)" ;;
+  esac
+else
+  bad "boot 34: no screendump"
+fi
+# boots 35 and 36: the crash screens through the transform. The early crash leaves the boot log with the sign-of-life band, which is along the
+# logical top: the raster's right edge. The late crash is the full-screen text console in the logical buffer, shown whole.
+for stage in early late; do
+  n=$([ "$stage" = early ] && echo 35 || echo 36)
+  python3 scripts/pi_dtb.py "$T/fb.dtb" --cmdline "milk.fbsize=800x480 milk.fbphys=1024x768 milk.fbrotate=90 milk.crashtest=$stage $FBT"
+  boot $n "wait@300:KERNEL PANIC"
+  sleep 2
+  python3 scripts/qmp.py "$QMP" screendump "$T/prescrash-$stage.png" >/dev/null 2>&1 || true
+  stop
+  has '^present: logical 800x480 -> rotate 90 clockwise' && ok "boot $n: the crash happened with the transform in use" || bad "boot $n: no transform line"
+  check "crash-test: a deliberate panic, $stage" "boot $n: the deliberate panic ($stage)"
+  if [ -s "$T/prescrash-$stage.png" ]; then
+    python3 -I - "$T/prescrash-$stage.png" "$stage" <<'PY' && ok "boot $n: the crash screen is the 800x480 text console, turned and stretched into the raster" || bad "boot $n: the crash screen is not what the model says"
+import sys
+sys.dont_write_bytecode = True
+sys.path.insert(0, "scripts")
+from png_check import decode
+w, h, rows = decode(sys.argv[1])
+assert (w, h) == (1024, 768), (w, h)
+bg = (22, 21, 19)
+near = lambda p: all(abs(p[i] - bg[i]) <= 2 for i in range(3))
+n = sum(1 for y in range(0, h, 4) for x in range(0, w, 4) if near(rows[y][x]))
+total = len(range(0, h, 4)) * len(range(0, w, 4))
+assert n * 100 > total * 40, (n, total)
+if sys.argv[2] == "early":
+    # The band: logical rows 0..4 green (0x30d060), row 5 white; turned 90 clockwise they are the last columns of the raster.
+    assert tuple(rows[300][1020]) == (48, 208, 96), rows[300][1020]
+    assert tuple(rows[500][1022]) == (48, 208, 96), rows[500][1022]
+    assert tuple(rows[300][1012]) == (255, 255, 255), rows[300][1012]
+PY
+  else
+    bad "boot $n: no screendump"
+  fi
+done
+# boot 37: options that cannot be used are said so and ignored: the desktop is 800x480 as before.
+python3 scripts/pi_dtb.py "$T/fb.dtb" --cmdline "milk.fbsize=800x480 milk.fbrotate=45 milk.fbphys=zz $FBT"
+boot 37 "wait@300:wm: desktop up"
+stop
+check '^present: milk\.fbrotate must be 0, 90, 180 or 270, using 0' "boot 37: a bad milk.fbrotate is refused"
+check '^present: milk\.fbphys must be WxH \(for example 1024x768\) or auto, ignored' "boot 37: a bad milk.fbphys is refused"
+check '^rpi fb: 800x480x32 pitch 3200 at ' "boot 37: the framebuffer is the logical size, as without the options"
+has '^present: logical' && bad "boot 37: a transform was set up from nothing" || ok "boot 37: no transform"
 
 # ---- boot 13 (only if MILK_REAL_DTB names a device tree from a real board's boot partition: it is not in the repository) ----
 if [ -n "${MILK_REAL_DTB:-}" ] && [ -r "$MILK_REAL_DTB" ]; then

@@ -112,7 +112,12 @@ fn with_screen(f: impl FnOnce(&mut Console)) {
         let cursor = crate::cursor::suspend();
         f(c);
         drop(cursor);
-        crate::display::sync();
+        // A console with a RAM shadow knows which rows it copied; the others show the whole screen.
+        match (c.has_shadow(), c.take_flushed()) {
+            (true, Some((lo, hi))) => crate::display::sync_rows(lo, hi),
+            (true, None) => {}
+            (false, _) => crate::display::sync(),
+        }
     }
     SCREEN.busy.store(false, Ordering::Release);
 }

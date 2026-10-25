@@ -144,8 +144,8 @@ pub trait TouchBus {
     fn transfer(&mut self, tx: &[u8], rx: &mut [u8]) -> bool;
 }
 
-/// Read the chip [`SAMPLES`] times and filter. `None`: no touch, or the bus failed.
-pub fn read<B: TouchBus>(bus: &mut B) -> Option<Touch> {
+/// Read the chip [`SAMPLES`] times, unfiltered. `None`: the bus failed.
+pub fn sample<B: TouchBus>(bus: &mut B) -> Option<[Raw; SAMPLES]> {
     let tx = burst();
     let mut raws = [Raw::default(); SAMPLES];
     for r in raws.iter_mut() {
@@ -155,7 +155,12 @@ pub fn read<B: TouchBus>(bus: &mut B) -> Option<Touch> {
         }
         *r = parse_burst(&rx)?;
     }
-    filter(&raws)
+    Some(raws)
+}
+
+/// Read the chip [`SAMPLES`] times and filter. `None`: no touch, or the bus failed.
+pub fn read<B: TouchBus>(bus: &mut B) -> Option<Touch> {
+    filter(&sample(bus)?)
 }
 
 // ---- calibration --------------------------------------------------------------------------------
@@ -397,6 +402,19 @@ pub fn fit(raw: &[(i32, i32)], screen: &[(i32, i32)]) -> Option<Cal> {
         e: fx(sy[1])?,
         f: px(sy[2])?,
     })
+}
+
+/// The worst distance, in pixels (the larger of the two axes), between each screen point and where `cal` maps its raw
+/// reading: how well a fit agrees with the touches it was made from.
+pub fn fit_error(cal: &Cal, raw: &[(i32, i32)], screen: &[(i32, i32)]) -> i32 {
+    raw.iter()
+        .zip(screen)
+        .map(|(r, s)| {
+            let p = cal.apply(r.0, r.1);
+            (p.0 - s.0).abs().max((p.1 - s.1).abs())
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 /// The four points the calibration helper asks for: inset from the corners.

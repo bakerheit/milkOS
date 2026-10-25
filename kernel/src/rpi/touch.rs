@@ -267,9 +267,21 @@ fn timer_ms() -> u64 {
     crate::timer::now_ns() / 1_000_000
 }
 
-/// Four crosses on the framebuffer, one after the other; the touches are fitted to an affine map
-/// and logged as the option to put in cmdline.txt. The boot console steps aside for it (the desktop
-/// takes the screen when it is done). Gives up (keeping the default) after a minute without a touch.
+/// How far (pixels, either axis) a fitted map may be from the four touches it was made from before the helper does not
+/// believe it and asks again (a cross touched out of order, a slipped finger).
+const CAL_MAX_ERROR: i32 = 48;
+/// How many times the four crosses are offered before the helper gives up and keeps the default.
+const CAL_ATTEMPTS: u32 = 3;
+/// Raw samples logged per cross, so a failed attempt can be read from the log without flooding it.
+const CAL_LOG_SAMPLES: u32 = 40;
+
+/// Four crosses on the logical framebuffer (the desktop's own pixels, whatever `milk.fbrotate` and `milk.fbphys` do to
+/// them on the glass), one after the other; the touches are fitted to an affine map (any swap or flip of the chip's
+/// axes is part of the fit) and logged as the option to put in cmdline.txt, in logical pixels. The boot console steps
+/// aside for it (the desktop takes the screen when it is done). Every raw sample is logged (the first 40 per cross, then
+/// a count), as is every reading the filter refused while something pressed, so a failed attempt can be diagnosed from
+/// the card's log. A minute with no touch at a cross gives up (keeping the default); touches that do not agree
+/// (error over 48 px) start the four crosses again, up to three times.
 fn calibrate(chip: &mut Chip, w: i32, h: i32) -> Option<Cal> {
     use crate::font;
     use crate::gfx::{DrawTarget, Surface, rgb};
@@ -277,90 +289,147 @@ fn calibrate(chip: &mut Chip, w: i32, h: i32) -> Option<Cal> {
     if crate::sink::screen_installed() {
         crate::sink::remove_screen();
     }
-    // SAFETY: the display's own framebuffer (w * h words), which nothing else draws on while the
+    // SAFETY: the display's own (logical) framebuffer (w * h words), which nothing else draws on while the
     // desktop waits for this helper.
     let mut surf = unsafe { Surface::from_raw(fbp, w as usize, h as usize, w as usize) };
     let targets = pk::cal_targets(w, h);
     let bg = rgb(0x16, 0x15, 0x13);
     let fg = rgb(0xec, 0xe6, 0xd8);
+    let dim = rgb(0x5a, 0x57, 0x50);
     let hot = rgb(0xf2, 0xd2, 0x7e);
-    let mut raws = [(0i32, 0i32); 4];
-    kprintln!("touch: calibration, touch the four crosses (milk.touch_cal=ask)");
-    let mut show = |lines: &[&str], cross: Option<(i32, i32)>| {
+    kprintln!(
+        "touch: calibration (milk.touch_cal=ask) on the {w}x{h} logical screen: crosses at ({},{}) ({},{}) ({},{}) ({},{}); touch each one firmly, {CAL_ATTEMPTS} tries, a minute per cross",
+        targets[0].0, targets[0].1, targets[1].0, targets[1].1, targets[2].0, targets[2].1, targets[3].0, targets[3].1
+    );
+    // The screen: a title in big letters, a line under it, all four crosses (the one to touch bright, the rest dim).
+    let mut show = |lines: &[(&str, i32)], active: Option<usize>| {
         surf.clear(bg);
-        for (i, l) in lines.iter().enumerate() {
-            font::draw_str_alpha(&mut surf, 40, h / 2 - 40 + 24 * i as i32, l, fg, 255, 2);
-        }
-        if let Some((x, y)) = cross {
-            surf.fill_rect(x - 20, y - 1, 41, 3, hot);
-            surf.fill_rect(x - 1, y - 20, 3, 41, hot);
-        }
-    };
-    for (i, t) in targets.iter().enumerate() {
-        let title = [
-            "Touch the cross: 1 of 4",
-            "Touch the cross: 2 of 4",
-            "Touch the cross: 3 of 4",
-            "Touch the cross: 4 of 4",
-        ][i];
-        show(&[title, "(press firmly with a stylus or a fingernail)"], Some(*t));
-        let mut agree = 0;
-        let mut last = (0i32, 0i32);
-        let mut sum = (0i32, 0i32);
-        let give_up = Timeout::ms(60_000);
-        loop {
-            if give_up.expired() {
-                kprintln!("touch: nobody touched, keeping the default calibration");
-                return None;
+        for (i, t) in targets.iter().enumerate() {
+            let on = active == Some(i);
+            let (arm, thick) = if on { (30, 7) } else { (18, 3) };
+            let c = if on { hot } else { dim };
+            surf.fill_rect(t.0 - arm, t.1 - thick / 2, 2 * arm + 1, thick, c);
+            surf.fill_rect(t.0 - thick / 2, t.1 - arm, thick, 2 * arm + 1, c);
+            if on {
+                // A frame around the one to touch, so it cannot be missed from across the room.
+                surf.fill_rect(t.0 - 40, t.1 - 40, 81, 3, c);
+                surf.fill_rect(t.0 - 40, t.1 + 38, 81, 3, c);
+                surf.fill_rect(t.0 - 40, t.1 - 40, 3, 81, c);
+                surf.fill_rect(t.0 + 38, t.1 - 40, 3, 81, c);
             }
-            crate::sched::sleep_ms(20);
-            match pk::read(chip) {
-                Some(t) => {
-                    let p = (t.x as i32, t.y as i32);
-                    if agree > 0 && ((p.0 - last.0).abs() > 120 || (p.1 - last.1).abs() > 120) {
+        }
+        let mut y = h / 2 - 48;
+        for (l, scale) in lines {
+            font::draw_str_alpha(&mut surf, 96, y, l, fg, 255, *scale);
+            y += 16 * *scale + 12;
+        }
+        display::sync();
+    };
+    for attempt in 1..=CAL_ATTEMPTS {
+        let mut raws = [(0i32, 0i32); 4];
+        for (i, t) in targets.iter().enumerate() {
+            let title = ["Touch the cross: 1 of 4", "Touch the cross: 2 of 4", "Touch the cross: 3 of 4", "Touch the cross: 4 of 4"][i];
+            show(
+                &[(title, 3), ("Press firmly with a stylus or a fingernail,", 2), ("and hold until the next cross shows.", 2)],
+                Some(i),
+            );
+            kprintln!("touch: attempt {attempt}, cross {} of 4 at logical ({},{})", i + 1, t.0, t.1);
+            let mut agree = 0;
+            let mut last = (0i32, 0i32);
+            let mut sum = (0i32, 0i32);
+            let give_up = Timeout::ms(60_000);
+            let (mut polls, mut seen, mut logged, mut refused) = (0u32, 0u32, 0u32, 0u32);
+            let mut next_note = Timeout::ms(5_000);
+            loop {
+                if give_up.expired() {
+                    kprintln!("touch: nobody touched cross {} in a minute ({polls} polls, {seen} touches, {refused} refused readings with pressure), keeping the default calibration", i + 1);
+                    return None;
+                }
+                crate::sched::sleep_ms(20);
+                polls += 1;
+                let Some(raw) = pk::sample(chip) else {
+                    agree = 0;
+                    sum = (0, 0);
+                    continue;
+                };
+                match pk::filter(&raw) {
+                    Some(t) => {
+                        seen += 1;
+                        if logged < CAL_LOG_SAMPLES {
+                            logged += 1;
+                            kprintln!("touch: cross {} sample {seen}: raw {},{} pressure {}", i + 1, t.x, t.y, t.pressure);
+                        }
+                        let p = (t.x as i32, t.y as i32);
+                        if agree > 0 && ((p.0 - last.0).abs() > 120 || (p.1 - last.1).abs() > 120) {
+                            kprintln!("touch: cross {}: the reading jumped from {},{} to {},{}, starting this cross's average again", i + 1, last.0, last.1, p.0, p.1);
+                            agree = 0;
+                            sum = (0, 0);
+                        }
+                        agree += 1;
+                        last = p;
+                        sum = (sum.0 + p.0, sum.1 + p.1);
+                        if agree >= 8 {
+                            raws[i] = (sum.0 / agree, sum.1 / agree);
+                            break;
+                        }
+                    }
+                    None => {
+                        // Something pressed (any of the five readings) but the filter did not take it: say what the chip said.
+                        if let Some(r) = raw.iter().max_by_key(|r| r.pressure()).filter(|r| r.pressure() > 60) {
+                            refused += 1;
+                            if refused <= 12 {
+                                kprintln!("touch: cross {}: reading refused: raw {},{} z1 {} z2 {} pressure {} (needs {} and five readings within {})", i + 1, r.x, r.y, r.z1, r.z2, r.pressure(), pk::PRESSURE_MIN, pk::SPREAD_MAX);
+                            }
+                        }
                         agree = 0;
                         sum = (0, 0);
                     }
-                    agree += 1;
-                    last = p;
-                    sum = (sum.0 + p.0, sum.1 + p.1);
-                    if agree >= 8 {
-                        raws[i] = (sum.0 / agree, sum.1 / agree);
-                        break;
-                    }
                 }
-                None => {
-                    agree = 0;
-                    sum = (0, 0);
+                if next_note.expired() {
+                    kprintln!("touch: cross {}: waiting ({polls} polls, {seen} touches seen, {refused} refused)", i + 1);
+                    next_note = Timeout::ms(5_000);
+                }
+            }
+            kprintln!("touch: cross {} raw {},{} -> logical ({},{})", i + 1, raws[i].0, raws[i].1, t.0, t.1);
+            show(&[("Thank you, lift your finger", 3)], None);
+            let lift = Timeout::ms(5_000);
+            while !lift.expired() {
+                crate::sched::sleep_ms(30);
+                if pk::read(chip).is_none() {
+                    break;
                 }
             }
         }
-        kprintln!("touch: cross {} raw {},{}", i + 1, raws[i].0, raws[i].1);
-        show(&["Thank you, lift your finger"], None);
-        let lift = Timeout::ms(5_000);
-        while !lift.expired() {
-            crate::sched::sleep_ms(30);
-            if pk::read(chip).is_none() {
-                break;
+        let fitted = pk::fit(&raws, &targets);
+        let err = fitted.map(|c| pk::fit_error(&c, &raws, &targets));
+        match (fitted, err) {
+            (Some(c), Some(e)) if e <= CAL_MAX_ERROR => {
+                let mut text = [0u8; 96];
+                let n = c.write(&mut text);
+                let t = core::str::from_utf8(&text[..n]).unwrap_or("?");
+                kprintln!("touch: fit agrees with the four touches to within {e} px (logical {w}x{h} pixels)");
+                kprintln!("touch: add this to cmdline.txt: milk.touch_cal={t}");
+                let line = alloc::format!("milk.touch_cal={t}");
+                show(
+                    &[("Calibrated. Put this in cmdline.txt:", 2), (&line, 1), ("(replacing milk.touch_cal=ask)", 2)],
+                    None,
+                );
+                // Long enough to copy it down.
+                crate::sched::sleep_ms(12_000);
+                return Some(c);
+            }
+            (Some(_), Some(e)) => {
+                kprintln!("touch: the four touches do not agree (worst {e} px off a straight map; raw {:?}), attempt {attempt} of {CAL_ATTEMPTS}", raws);
+                show(&[("The touches did not agree.", 3), ("Starting again: touch the crosses in order.", 2)], None);
+                crate::sched::sleep_ms(2_500);
+            }
+            _ => {
+                kprintln!("touch: the four touches do not give a calibration (raw {:?}), attempt {attempt} of {CAL_ATTEMPTS}", raws);
+                show(&[("The touches did not give a map.", 3), ("Starting again: touch the crosses in order.", 2)], None);
+                crate::sched::sleep_ms(2_500);
             }
         }
     }
-    let cal = pk::fit(&raws, &targets);
-    let mut text = [0u8; 96];
-    match cal {
-        Some(c) => {
-            let n = c.write(&mut text);
-            let t = core::str::from_utf8(&text[..n]).unwrap_or("?");
-            kprintln!("touch: add this to cmdline.txt: milk.touch_cal={t}");
-            let line = alloc::format!("milk.touch_cal={t}");
-            surf.clear(bg);
-            font::draw_str_alpha(&mut surf, 40, h / 2 - 40, "Calibrated. Put this in cmdline.txt:", fg, 255, 2);
-            font::draw_str_alpha(&mut surf, 40, h / 2, &line, hot, 255, 1);
-            font::draw_str_alpha(&mut surf, 40, h / 2 + 40, "(replacing milk.touch_cal=ask)", fg, 255, 2);
-            // Long enough to copy it down.
-            crate::sched::sleep_ms(12_000);
-        }
-        None => kprintln!("touch: the four touches do not give a calibration, keeping the default"),
-    }
-    cal
+    kprintln!("touch: calibration failed {CAL_ATTEMPTS} times, keeping the default");
+    None
 }

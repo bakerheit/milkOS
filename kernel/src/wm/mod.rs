@@ -261,6 +261,15 @@ pub fn run() {
         crate::rpi::led::finish();
         return;
     };
+    // `milk.fbtest=1` (Raspberry Pi): the calibration pattern instead of the desktop, to photograph the panel's geometry.
+    #[cfg(feature = "raspi")]
+    if crate::fwcfg::option("fbtest") == Some(b"1") {
+        crate::rpi::present::fbtest(fb);
+        crate::rpi::led::finish();
+        loop {
+            sched::sleep_ms(1000);
+        }
+    }
     // The desktop is as big as the display: 1024x768, or the size the Raspberry Pi's firmware reported
     // (an 800x480 panel) or milk.fbsize= asked for.
     let (fw, fh) = display::size();

@@ -37,7 +37,7 @@ so those paths are skipped there) and logs what it reads; the first boot on a re
 ```
 scripts/pi-run.sh               # a window (cocoa) and the serial console on this terminal
 scripts/pi-run.sh headless      # serial only
-scripts/pi-qemu-test.sh         # the test: twelve boots, see its header (a few minutes)
+scripts/pi-qemu-test.sh         # the test: about forty boots, see its header (several minutes)
 scripts/pi-log-test.sh          # the SD card log on a fragmented file and on cards that must be refused: twelve boots, see its header
 scripts/pi-log-multiboot-test.sh  # the SD card log across boots: three boots on an 8 MiB file, then a 64 KiB file that wraps
 scripts/pi-readlog-test.sh      # the Mac-side log reader on made-up files (no VM)
@@ -81,6 +81,7 @@ them, so every existing option works unchanged:
 | `milk.watchdog=on` / `off` / `sim` | the power manager's watchdog as a safety net: armed at the end of the boot, kicked from the timer interrupt, resets a frozen board after 15 s; default on ("Watchdog") |
 | `milk.fbsize=WxH` / `auto` | the framebuffer (and so the desktop) size: `auto` (the default) follows the display mode the firmware has set up (the mailbox's physical size: 800x480 for a panel that takes that mode, 1920x1080 for a television), `WxH` forces a size (640x400 to 4096x2160); 1024x768 when the firmware reports nothing usable ("HDMI displays") |
 | `milk.touch=xpt2046` | the touch chip of an HDMI display, with no SPI panel (`milk.touch_cs=`, `milk.touch_irq=`, `milk.touch_cal=`, `milk.touch_rot=`: "HDMI displays") |
+| `milk.fbphys=PxQ` / `auto`, `milk.fbrotate=0\|90\|180\|270`, `milk.fbtest=1` | the present transform for a panel whose scaler distorts the picture: the firmware's raster, a clockwise turn of the logical picture, a test card ("A panel whose scaler distorts the picture") |
 | `milk.fbscale=N` | magnify the boot log and crash screen font N times (default 1; 2 from 1600 px wide) |
 | `milk.ledcodes=0` | no ACT LED progress codes (the LED just turns on at the start of `kmain`; the `led: stage` log lines stay; the "log saved" signal and the log error blink are off too). Default on; the codes add about 9 s to a boot |
 | `milk.lcd=ili9486` (or `ili9486p`, `ili9486p18`, `ili9488`, `st7796`, `ili9481`, `r61581`, `hx8357`, `ili9341`, `st7789`) | the 3.5-inch SPI display on the GPIO header (off without it; many more options: "3.5-inch SPI display"); `milk.lcd=probe` tries them all |
@@ -623,6 +624,8 @@ leave `milk.lcd=` out (the probe can never light it: all it shows is the panel's
 
 Copy them onto the boot partition as for any card ("Putting it on a card"); the block's comments say what each line does.
 
+**Note on the 1280x768 recipe.** It assumes the firmware stretches a framebuffer to the video mode. A real board's photo says it does not (it centres it with bars at a uniform scale, see "A panel whose scaler distorts the picture"): on a panel whose scaler stretches the raster the working recipe is a framebuffer that *is* the raster and a software stretch, for the 800x480 landscape panel `milk.fbsize=800x480 milk.fbphys=1024x768`, which would show it 1:1. That is not verified on that panel, so `hdmi800x480` still writes the recipe below.
+
 **Why `milk.fbsize=1280x768`.** The firmware can only report the mode it was told to output (1024x768 here), not the shape of the glass behind the
 panel's scaler. A 1024x768 framebuffer (4:3) shown on a 5:3 panel is squashed. The desktop therefore draws 1280x768 (5:3, a size it is made for), the
 firmware scales that to the 1024x768 mode and the panel scales it to 800x480: the proportions come out right. With a mode the panel accepts natively
@@ -686,9 +689,118 @@ once the log says `touch: running`.
 | "Not Support" / "No signal" on the panel | the commented alternative modes in the block, in order: custom 800x480 CVT, 720p, 800x600, 640x480; a different micro-HDMI port; power on the panel's micro-USB; a shorter cable |
 | flicker, snow, dropouts, a picture that comes and goes | `hdmi_cvt=800 480 60 6 0 0 1` (reduced blanking, with mode 87), `config_hdmi_boost=7` (1..11, default 5), `hdmi_pixel_freq_limit=40000000`, a shorter or better cable |
 | off by a few pixels, an edge cut off, a black border | `disable_overscan=0` with `overscan_left/right/top/bottom`, or the explicit `hdmi_timings=` line of the block |
-| rotated or upside down | the panel is turned by hand, or `display_hdmi_rotate=2` (1 = 90, 3 = 270) in `config.txt`: a firmware option for its own framebuffer, not verified on a Pi 4 here; the touch then needs `milk.touch_rot=` or `milk.touch_cal=ask` to match. milkOS has no software rotation (`milk.fbrotate`): a rotated framebuffer would mean copying every frame, which the desktop does not do |
+| rotated or upside down | a panel fitted the other way: `milk.fbrotate=180` (or `90` / `270` with a portrait glass) turns the picture in software ("A panel whose scaler distorts the picture"), the firmware can also turn its own output (`display_hdmi_rotate=2`; 1 = 90, 3 = 270; not verified on a Pi 4 here); the touch then needs `milk.touch_rot=` or `milk.touch_cal=ask` to match |
 | squashed or stretched | the framebuffer's shape is not the panel's: `milk.fbsize=1280x768` (5:3) for a 1024x768 mode; with an 800x480 mode `milk.fbsize=800x480` |
 | the picture is fine and the touch is wrong | the touch table above; the log's first three touches show the raw numbers |
+
+### A panel whose scaler distorts the picture (`milk.fbphys=`, `milk.fbrotate=`, `milk.fbtest=`)
+
+Some HDMI scaler boards accept only standard video modes and stretch whatever raster they get over the whole glass. One real board
+(a portrait 480x800 glass) refused a custom 800x480 timing, accepts `hdmi_group=2 hdmi_mode=16 hdmi_drive=2` (1024x768 at 60 Hz) and
+stretches that raster over the glass **non-uniformly**: 1024 columns become 480 (x 0.469), 768 rows become 800 (x 1.04). A normal 4:3
+desktop shown through it looks squeezed about 2.2 times. The firmware cannot help: its legacy framebuffer **does not stretch a
+framebuffer to the video mode**. Given another shape than the mode it centres it with black bars at a *uniform* scale (the
+"pillarbox" below). The only undistorted picture is therefore a framebuffer that is exactly the raster, filled by the kernel itself
+with the inverse of the panel's stretch. That is the present transform (`rpikit::fbpresent`, `kernel/src/rpi/present.rs`):
+
+```
+ logical picture            rotated clockwise           the firmware's raster         what the glass shows
+ (milk.fbsize=800x480)  ->  (milk.fbrotate=90: 480x800) -> (milk.fbphys=1024x768) ->  the panel's own stretch
+ the desktop draws here     x 2.133 across, 0.960 down    area-weighted resample      brings back 480x800
+```
+
+| option | default | does |
+|---|---|---|
+| `milk.fbsize=WxH` | `auto` | the **logical** framebuffer: what the desktop, the boot log console, the crash screen and the touch calibration draw on and what touch coordinates are in (cached RAM) |
+| `milk.fbphys=PxQ` / `auto` | not set | the firmware's **physical** framebuffer, which must be the video mode's raster; `auto` asks the mailbox for the display size the firmware reports (1024x768 when it reports nothing usable, see above). Not set: the physical framebuffer is the logical one |
+| `milk.fbrotate=0` / `90` / `180` / `270` | `0` | turn the logical picture clockwise by that much before it is stretched |
+| `milk.fbtest=1` | off | draw the calibration pattern (below) on the logical screen instead of starting the desktop |
+
+With neither `milk.fbphys` nor `milk.fbrotate` (or with the logical size equal to the raster and no turn) **nothing changes and nothing is
+copied**: the firmware's buffer is the desktop's, as before. Otherwise every frame the desktop shows is converted: only the physical
+rectangles whose footprint touches a changed logical rectangle are redone (the window system already tracks changed rectangles), each
+physical pixel the **area-weighted average** of the rotated pixels under it, in fixed point (weights in 1/256 that add up to exactly 256: a flat colour
+stays exactly that colour, text stays legible at 0.96 down and 2.1 across). The boot log console, the crash screens (no allocation, no locks,
+interrupts may be off: the tables and buffers are made once at start-up), the sign-of-life band, the `milk.touch_cal=ask` crosses and the
+test pattern all go through it. The SPI panel driver, if used too, shows the logical picture. A mode change in Settings is refused (the
+logical size is the command line's).
+
+The boot log says what it did:
+
+```
+rpi fb: 1024x768x32 pitch 4096 at 0x3c100000 (3072 KiB)
+present: logical 800x480 -> rotate 90 clockwise -> 480x800 -> stretch (x 2.133, y 0.960) -> firmware raster 1024x768
+present: logical corners (0,0) -> (1022,0), (799,0) -> (1022,767), (799,479) -> (1,767), (0,479) -> (1,0)
+present: area-weighted filter, up to 2 taps across and 2 down, tables 1792 entries, logical buffer 1500 KiB; a full 1024x768 frame took N us
+display: rpi mailbox framebuffer (converted into the firmware raster) 800x480 XRGB8888, the boot log is on screen until the desktop starts
+```
+
+(The `N us` is the first full frame on *your* board: the number to look at for the cost. A frame costs about 786 k physical pixels times
+at most 4 taps. On qemu's TCG it is 70 to 110 ms, which says nothing about an A72; the host tests run the same loop. Typical desktop updates
+are small rectangles, not full frames.)
+
+**The recipe for the portrait 480x800 glass.** `scripts/pi-bootdir.sh /tmp/milkos-boot --display hdmi4inch-portrait` writes `config.milkos.txt`
+(`hdmi_group=2 hdmi_mode=16 hdmi_drive=2`, the usual lines, the alternative modes and the cmdline alternatives as comments) and
+`cmdline.milkos.txt`:
+
+```
+milk.fbscale=1 milk.fbsize=800x480 milk.fbphys=1024x768 milk.fbrotate=90 milk.touch=xpt2046
+```
+
+An **800x480 landscape desktop, turned 90 degrees**, so the glass shows it 1:1 (480 logical rows are the glass's 480 columns, 800 logical
+columns its 800 rows) and the fonts stay legible; turn the panel on its side to read it. If it is upside down, use `milk.fbrotate=270`.
+Alternatives (all in the comments of the file): **an upright portrait desktop**, `milk.fbsize=640x1067 milk.fbphys=1024x768 milk.fbrotate=0`, is
+usable (checked on qemu through a model of the glass: the desktop lays out at 640x1067, a window or two is cut at the right edge, and it is
+shown at 0.75 scale so the text is small); `480x800` itself is refused, the desktop accepts nothing narrower than 640x400. Another mode
+(720p, 800x600, 640x480): change `hdmi_mode` and name the raster with `milk.fbphys=WxH` or `auto`.
+
+**Reading a panel's shape from a photo (the pillarbox trick).** Boot once with `milk.fbsize=768x1280` (portrait, aspect 0.6) and no `milk.fbphys`.
+The firmware then puts that framebuffer, uniformly scaled, in the middle of the 1024x768 raster: a 460x768 strip with black bars on both
+sides (`rpikit::fbpresent::pillarbox`, host-tested). A panel that stretches the raster over a 480x800 glass shows that strip about 215 pixels
+wide out of 480, 45%, full height, bars left and right: that is what a real photo of this panel showed. A tall thin strip with bars at the sides means a portrait glass behind a landscape raster;
+bars on top and bottom, a landscape glass; no bars, the panel shows the raster at its own aspect.
+
+**The test card, and how to read a photograph of it.** `milk.fbtest=1` stops after the display is up and fills the **logical** screen with the pattern
+(`rpikit::fbpresent::pattern_pixel`; `scripts/fbpresent_check.py` has an independent copy): a 2 px white border all round; a 40 px marker in
+each corner, clockwise from the logical top left **red, green, blue, yellow**; cross-hairs through the middle; a magenta diagonal from the logical top left to the
+bottom right; eight colour bars (white, yellow, cyan, green, magenta, red, blue, black); a dim grid every 80 px. On a correct set-up and with the panel turned
+to read the desktop upright: the border is on all four edges (nothing cut off), the red marker is top left and the others follow clockwise, **the grid squares are square**
+and the diagonal runs corner to corner. A squeezed picture (squares are tall thin rectangles) means the raster is not what the panel expects (`milk.fbphys=`), a mirrored
+one (red top right) the wrong `milk.fbrotate`, bars at an edge a raster that is not the video mode, a missing border an overscan or timing problem (see the table above). The same
+pattern, seen through qemu and a model of the glass:
+
+| the logical screen (800x480) | the firmware's raster, as qemu dumped it (1024x768, turned and stretched) | the glass (480x800: the raster stretched the panel's way) | the glass turned back |
+|---|---|---|---|
+| ![](screenshots/raspberry-pi-fbpresent-pattern-logical.png) | ![](screenshots/raspberry-pi-fbpresent-pattern-raster.png) | ![](screenshots/raspberry-pi-fbpresent-pattern-glass.png) | ![](screenshots/raspberry-pi-fbpresent-pattern-seen.png) |
+
+and the desktop the same way (`milk.fbsize=800x480 milk.fbphys=1024x768 milk.fbrotate=90`, the 1024x768 dump put through the model of the glass and turned back):
+![](screenshots/raspberry-pi-fbpresent-desktop-seen.png)
+
+**Touch.** Coordinates are always the logical pixels of the desktop: `milk.touch_rot=` and `milk.touch_cal=` map the chip's raw readings
+to logical pixels, as before. With `milk.fbrotate=90` the chip's axes may be turned relative to the picture, so use
+`milk.touch=xpt2046 milk.touch_cal=ask`: four crosses are drawn on the **logical** screen, inset 32 px from the logical corners (so inset the same way on the glass), the bright
+one with a frame is the one to touch, the others dim; touch each firmly until the next appears. Every raw sample is logged
+(`touch: cross 1 sample 3: raw 2011,1890 pressure 1500`, the first 40 per cross), as is every reading the filter refused while something pressed
+(`reading refused: raw .. z1 .. z2 .. pressure ..`), a count every 5 s while waiting, and the result in logical pixels:
+
+```
+touch: calibration (milk.touch_cal=ask) on the 800x480 logical screen: crosses at (32,32) (767,32) (767,447) (32,447); ...
+touch: cross 1 raw 3650,3600 -> logical (32,32)
+...
+touch: fit agrees with the four touches to within 3 px (logical 800x480 pixels)
+touch: add this to cmdline.txt: milk.touch_cal=a,b,c,d,e,f
+```
+
+Copy the last line into `cmdline.txt`, replacing `milk.touch_cal=ask`. The fit is a six-number affine map, so any swap or flip of the chip's axes is part of it (host-tested for all eight
+ways round); touches that do not agree to 48 px (a cross touched out of order) start the four crosses again, three tries. A minute with no touch at a cross gives up and keeps the default, as before; the desktop waits for
+the helper meanwhile (at most two minutes), so leave `ask` out once you have the line.
+
+**What is verified and what is not.** Verified: the model (rotations, exact fills, no overflow, hostile sizes, dirty-rectangle coverage, the round trip through a model of
+the panel) by `rpikit-unit`; the kernel's output on qemu's raspi4b against an independent floating point model for 90 and 270 degrees and two rasters
+(`pi-qemu-test` boots 31 and 32, mean error 0.02 of 255 grey levels, worst 0.8), the desktop, the touch calibration crosses and both crash screens through
+the transform (boots 33 to 36), bad options refused (boot 37). **Only the real panel can show**: whether the board's stretch is
+the one assumed (480/1024 and 800/768 come from the photos and logs of that one panel, not from a specification), which way the panel must be turned for `90`, how sharp the text is through two
+resamplings (the board's own filter is unknown), what a frame costs on an A72, and which way the touch chip's axes run.
 
 ## 3.5-inch SPI display
 

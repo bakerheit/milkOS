@@ -69,7 +69,16 @@ fn map_buffer(phys: usize, size: usize) -> Option<usize> {
 
 fn configure(w: usize, h: usize) -> Option<Surface<'static>> {
     let (w, h) = (u32::try_from(w).ok()?, u32::try_from(h).ok()?);
-    let mut fb = match request(w, h) {
+    let first = request(w, h);
+    // The mailbox answered unless the exchange itself failed (no buffer page, or it timed out).
+    if !LIVE.load(Ordering::Acquire) {
+        let answered = !matches!(
+            first,
+            Err(mailbox::Error::Timeout | mailbox::Error::NoMemory)
+        );
+        super::led::stage(rpikit::ledcode::Stage::Mailbox, answered);
+    }
+    let mut fb = match first {
         Ok(f) => f,
         Err(e) => {
             kprintln!("rpi fb: the firmware refused {w}x{h}: {e:?}");
@@ -156,7 +165,9 @@ pub fn band() {
 /// Allocate the framebuffer at `w` x `h` (or what the firmware makes of it). `None` without a
 /// usable display.
 pub fn init(w: usize, h: usize) -> Option<Surface<'static>> {
-    let s = configure(w, h)?;
+    let s = configure(w, h);
+    super::led::stage(rpikit::ledcode::Stage::Framebuffer, s.is_some());
+    let s = s?;
     LIVE.store(true, Ordering::Release);
     Some(s)
 }

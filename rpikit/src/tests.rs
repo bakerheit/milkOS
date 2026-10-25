@@ -1615,3 +1615,120 @@ fn nodes_switched_off_are_noticed() {
     );
     assert!(!d.node_disabled(b"nothing@"));
 }
+
+// ---- the ACT LED boot codes ---------------------------------------------------------------
+
+mod ledcode_tests {
+    use crate::ledcode::{self, Burst, Interval, Stage};
+    use std::vec::Vec;
+
+    fn iv(on: bool, ms: u32) -> Interval {
+        Interval { on, ms }
+    }
+
+    #[test]
+    fn marker_is_one_long_pulse_between_dark() {
+        let m: Vec<_> = Burst::marker().collect();
+        assert_eq!(m, [iv(false, 500), iv(true, 1000), iv(false, 500)]);
+    }
+
+    #[test]
+    fn a_stage_is_n_pulses_then_a_pause() {
+        let b: Vec<_> = Burst::stage(Stage::Framebuffer, true).collect();
+        assert_eq!(
+            b,
+            [
+                iv(true, 100),
+                iv(false, 100),
+                iv(true, 100),
+                iv(false, 100),
+                iv(true, 100),
+                iv(false, 300)
+            ]
+        );
+        assert_eq!(
+            Burst::stage(Stage::Memory, true).collect::<Vec<_>>(),
+            [iv(true, 100), iv(false, 300)]
+        );
+    }
+
+    #[test]
+    fn a_failed_stage_is_the_same_count_but_slow() {
+        let b: Vec<_> = Burst::stage(Stage::SdCard, false).collect();
+        assert_eq!(b.len(), 10);
+        assert_eq!(b[0], iv(true, 400));
+        assert_eq!(b[1], iv(false, 400));
+        assert_eq!(b[9], iv(false, 800));
+        assert_eq!(b.iter().filter(|i| i.on).count(), 5);
+    }
+
+    #[test]
+    fn stages_are_numbered_in_order_with_distinct_names() {
+        for (i, s) in Stage::ALL.iter().enumerate() {
+            assert_eq!(s.code() as usize, i + 1);
+            assert_eq!(Burst::stage(*s, true).filter(|i| i.on).count(), i + 1);
+        }
+        let mut names: Vec<_> = Stage::ALL.iter().map(|s| s.name()).collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), Stage::ALL.len());
+    }
+
+    #[test]
+    fn a_boot_sequence_alternates_and_fits_the_budget() {
+        let all: Vec<_> = Stage::ALL.iter().map(|&s| (s, true)).collect();
+        let v: Vec<_> = ledcode::sequence(&all).collect();
+        // The marker, then 1+2+...+7 = 28 pulses.
+        assert_eq!(v.iter().filter(|i| i.on).count(), 1 + 28);
+        // The marker's 1 s pulse is the only on-interval over 100 ms.
+        assert_eq!(v.iter().filter(|i| i.on && i.ms > 100).count(), 1);
+        // Never two equal levels in a row within a burst, and every interval is a visible length.
+        assert!(v.iter().all(|i| i.ms >= 100));
+        // A good boot adds 2 s (marker) + sum of (200 N + 200) ms for N = 1..7 = 9 s.
+        let total: u32 = v.iter().map(|i| i.ms).sum();
+        assert_eq!(total, 9000);
+    }
+
+    #[test]
+    fn bursts_are_bounded_and_do_not_overflow() {
+        // A huge code is cut to MAX_PULSES.
+        let b = Burst::pulses(255, true);
+        assert_eq!(b.count(), 2 * ledcode::MAX_PULSES as usize);
+        assert!(Burst::pulses(255, true).total_ms() < 60_000);
+        // The iterator ends and stays ended.
+        let mut b = Burst::pulses(0, false);
+        assert_eq!(b.next(), None);
+        assert_eq!(b.next(), None);
+        let mut b = Burst::marker();
+        for _ in 0..3 {
+            b.next();
+        }
+        assert_eq!(b.next(), None);
+        assert_eq!(b.next(), None);
+        // The worst case sum, widened: no u32 overflow.
+        let worst: u64 = Burst::pulses(255, true).map(|i| i.ms as u64).sum();
+        assert_eq!(worst, Burst::pulses(255, true).total_ms() as u64);
+    }
+
+    #[test]
+    fn total_ms_matches_the_intervals() {
+        let b = Burst::stage(Stage::Scheduler, true);
+        assert_eq!(b.total_ms(), 6 * 200 + 200);
+        assert_eq!(Burst::marker().total_ms(), 2000);
+    }
+
+    #[test]
+    fn the_option_is_on_unless_switched_off() {
+        assert!(ledcode::enabled(None));
+        assert!(ledcode::enabled(Some(b"1")));
+        assert!(ledcode::enabled(Some(b"")));
+        assert!(ledcode::enabled(Some(b"banana")));
+        assert!(!ledcode::enabled(Some(b"0")));
+        assert!(!ledcode::enabled(Some(b" off ")));
+        assert!(!ledcode::enabled(Some(b"NO")));
+        assert!(!ledcode::enabled(Some(b"false")));
+        // And through the real command line parser.
+        let line = b"console=tty1 milk.ledcodes=0 milk.sdwrite=1\n";
+        assert!(!ledcode::enabled(crate::cmdline::value(line, "ledcodes")));
+    }
+}

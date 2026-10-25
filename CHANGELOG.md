@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+**Raspberry Pi 4** (docs/raspberry-pi.md)
+- The green ACT LED is now a boot progress readout for a board with no screen and no serial cable: a 1 s start
+  marker once memory is up, then N pulses per milestone (memory, mailbox, framebuffer, interrupts, SD card,
+  scheduler and CPUs, userspace), solid on when the desktop is up, fast flashing after a crash; a milestone
+  that failed repeats its number slowly. The same stages are logged as `led: stage N name`. `milk.ledcodes=0`
+  turns the codes off (they add about 9 s to a boot). The pattern language is host-tested (`rpikit::ledcode`);
+  `pi-qemu-test` checks the stage order and samples the LED pin (qemu models the GPIO block). How to read it, and
+  how to tell it from the firmware's own error flashes, is at the top of "Reading the ACT LED".
+
 ## 0.2.0 (2026-10-24)
 
 **Raspberry Pi 4** (docs/raspberry-pi.md)

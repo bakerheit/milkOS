@@ -16,6 +16,10 @@
 #           full-screen text console (screendump: the desktop is gone, the console background is there);
 #   boots 6, 7: `milk.crashtest=late-off` / `late-reset`: the desktop's Shut Down and Restart on a board with no PSCI
 #           (the SoC's power manager): qemu exits by itself / the machine boots again.
+#   The ACT LED codes (docs/raspberry-pi.md): qemu's raspi4b does model the GPIO block (GPFSEL4 and the level register
+#           GPLEV1 read back what the kernel wrote), so the pin is sampled while booting: boot 1 sees it high, then dark
+#           (the start marker and the codes), then high again (solid on); boot 3 (`milk.ledcodes=0`) never sees it dark
+#           once it is on; boot 5's crash sees it flash. All boots check the `led: stage N name` lines in order.
 #           (raspi4b has exactly 2 GiB, so a layout above 4 GiB cannot run here: the allocator and
 #           page tables above 4 GiB are tested on qemu virt, scripts/highmem-test.sh.)
 # Offline, private images in a fresh /tmp folder, the qemu started here killed by PID.
@@ -43,11 +47,18 @@ fi
 python3 scripts/pi_dtb.py "$T/pi.dtb" --cmdline "milk.sdwrite=1"
 python3 scripts/mkmilkfs.py mkfs "$T/sd.img" --size 64M --label Milk >/dev/null
 # boot 3's tree: no CPUs (it must fit under the boot stub's own code at 0x300), two banks.
-python3 scripts/pi_dtb.py "$T/banks.dtb" --cpus 0 --ram-bytes 0x3b400000 --bank 0x40000000:0x40000000
+python3 scripts/pi_dtb.py "$T/banks.dtb" --cpus 0 --ram-bytes 0x3b400000 --bank 0x40000000:0x40000000 --cmdline "milk.ledcodes=0"
 P='msh:[^\n]*\$ '
 QPID=""
 DTB_ARGS=(-dtb "$T/pi.dtb")
 trap '[ -n "$QPID" ] && kill -9 "$QPID" 2>/dev/null || true' EXIT
+
+pin_level() { # QMP socket -> 0 or 1 (nothing if qemu does not answer yet)
+  local v
+  v=$(python3 scripts/qmp.py "$1" hmp "xp /1wx 0xfe200038" 2>/dev/null | grep -Eao '0x[0-9a-f]+' | head -1) || true
+  [ -n "$v" ] && echo $(( (v >> 10) & 1 ))
+  return 0
+}
 
 # boot N: start qemu on the card image, drive the serial console with the steps after it.
 boot() {
@@ -61,6 +72,15 @@ boot() {
   QPID=$!
   python3 scripts/serial_drive.py "$SOCK" "$LOG" "$@" "done:$T/done$n" &
   D=$!
+  SP=""
+  if [ "${SAMPLE:-}" = 1 ]; then
+    # The ACT LED pin (GPIO 42: bit 10 of GPLEV1 at 0xfe200038), over and over until the boot is done.
+    : > "$T/pin$n"
+    ( while [ ! -e "$T/done$n" ] && kill -0 "$QPID" 2>/dev/null; do
+        v=$(pin_level "$QMP"); [ -n "$v" ] && printf '%s' "$v" >> "$T/pin$n"
+      done ) &
+    SP=$!
+  fi
   for _ in $(seq 1500); do [ -e "$T/done$n" ] && break; kill -0 "$QPID" 2>/dev/null || break; sleep 0.2; done
   # A machine that powers itself off ends the loop above before the script has written its marker.
   for _ in 1 2 3 4 5 6 7 8 9 10; do [ -e "$T/done$n" ] && break; sleep 0.3; done
@@ -69,7 +89,12 @@ boot() {
 stop() {
   kill -9 "$QPID" 2>/dev/null || true; wait "$QPID" 2>/dev/null || true; QPID=""
   { kill "$D"; wait "$D"; } 2>/dev/null || true
+  [ -n "${SP:-}" ] && { wait "$SP"; } 2>/dev/null || true
 }
+led_lines() { # the "led: stage N name" lines of the log, one line: 1:memory 2:mailbox ...
+  tr -d '\r' < "$LOG" | sed -n -E 's/^led: stage ([0-9]+) ([a-z]+)$/\1:\2/p; s/^led: done, solid on$/done/p' | tr '\n' ' ' | sed 's/ $//'
+}
+LED_ORDER='1:memory 2:mailbox 3:framebuffer 4:interrupts 5:sdcard 6:scheduler 7:userspace done'
 out() { # output of the command typed as $1 (the last time), up to the next prompt
   tr -d '\r' < "$LOG" | awk -v c="$1" '/^msh:/ { if (on) {on=0}; if (substr($0, index($0, "$ ") + 2) == c) {buf=""; on=1; next} } $0 == c && !on {buf=""; on=1; next} on {buf = buf $0 "\n"} END {printf "%s", buf}'
 }
@@ -79,7 +104,7 @@ check() { # pattern what
 }
 
 # ---- boot 1 ----
-boot 1 "wait@300:wm: desktop up" \
+SAMPLE=1 boot 1 "wait@300:wm: desktop up" \
   "send:system" "wait:$P" \
   "send:disks" "wait:$P" \
   "send:print hello-from-the-pi > /Users/milk/Documents/pi.txt" "wait:$P" \
@@ -98,6 +123,10 @@ check '^display: rpi mailbox framebuffer 1024x768' "the display on it"
 check '^\[sdhci\] .*card ready' "the SD card"
 check '^milkfs: mmcblk0 mounted at /Volumes/Milk' "milkfs on the SD card"
 check 'wm: desktop up' "the desktop"
+[ "$(led_lines)" = "$LED_ORDER" ] && ok "LED codes: the milestones in order ($(led_lines))" || bad "LED codes: wrong stages: $(led_lines)"
+PIN=$(cat "$T/pin1")
+echo "$PIN" | grep -Eq '10+1' && ok "LED pin: high, dark (the start marker and the codes), high again (solid on)" || bad "LED pin never did high-dark-high: ${PIN:0:80}..."
+case "$PIN" in *1) ok "LED pin: solid on at the end";; *) bad "LED pin is not on at the end";; esac
 has 'KERNEL PANIC|kernel panic' && bad "a kernel panic" || ok "no panic"
 out system | grep -Eq '^CPUs +4' && ok "system says 4 CPUs" || bad "system: $(out system)"
 out system | grep -Eq '^memory +[0-9]+ MB' && ok "system: $(out system | grep '^memory')" || bad "system has no memory line"
@@ -135,7 +164,7 @@ check '^milkfs: mmcblk0 mounted' "boot 2: the card mounts again"
 
 # ---- boot 3: two RAM banks and a hole ----
 DTB_ARGS=(-device "loader,file=$T/banks.dtb,addr=0x100,force-raw=on")
-boot 3 "wait@300:$P" "wait@300:wm: desktop up" "send:system" "wait:$P"
+SAMPLE=1 boot 3 "wait@300:$P" "wait@300:wm: desktop up" "send:system" "wait:$P"
 sleep 1
 python3 scripts/qmp.py "$QMP" screendump "$T/banks.png" >/dev/null 2>&1 || true
 stop
@@ -144,6 +173,9 @@ check '^mem:   bank 0x0\.\.0x3b400000 ' "boot 3: the first bank"
 check '^mem:   bank 0x40000000\.\.0x80000000 ' "boot 3: the second bank"
 check '^rpi fb: 1024x768x32 pitch 4096 at 0x3c' "boot 3: the framebuffer in the hole between them"
 check 'wm: desktop up' "boot 3: the desktop"
+[ "$(led_lines)" = "$LED_ORDER" ] && ok "boot 3: LED stages still logged with milk.ledcodes=0" || bad "boot 3: wrong LED stages: $(led_lines)"
+PIN=$(cat "$T/pin3")
+echo "$PIN" | grep -Eq '^0*1+$' && ok "boot 3: milk.ledcodes=0: the LED goes on and stays on (no codes)" || bad "boot 3: the LED went dark with ledcodes off: ${PIN:0:80}..."
 has 'KERNEL PANIC|kernel panic' && bad "boot 3: a kernel panic" || ok "boot 3: no panic"
 out system | grep -Eq '^memory +(1\.9|2\.0) GB' && ok "boot 3: system: $(out system | grep '^memory')" || bad "boot 3: system: $(out system)"
 [ -s "$T/banks.png" ] && python3 -I scripts/png_check.py "$T/banks.png" >/dev/null 2>&1 && ok "boot 3: a screendump" || bad "boot 3: no screendump"
@@ -166,6 +198,12 @@ for stage in early late; do
   boot $n "wait@300:KERNEL PANIC"
   sleep 2
   python3 scripts/qmp.py "$QMP" screendump "$T/crash-$stage.png" >/dev/null 2>&1 || true
+  if [ $stage = late ]; then
+    # The crash flashes the LED (about 5 Hz): sample the pin for two seconds, it must be seen both high and low.
+    PIN=""
+    for _ in $(seq 25); do PIN="$PIN$(pin_level "$QMP")"; sleep 0.05; done
+    case "$PIN" in *0*1*|*1*0*) ok "boot 5: the LED flashes after the crash ($PIN)";; *) bad "boot 5: the LED does not flash after the crash: $PIN";; esac
+  fi
   stop
   check "^panicked at .*crash-test: a deliberate panic, $stage|crash-test: a deliberate panic, $stage" "boot $n: the deliberate panic ($stage)"
   if [ -s "$T/crash-$stage.png" ]; then

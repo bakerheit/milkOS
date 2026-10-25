@@ -257,6 +257,8 @@ pub fn stats() -> Stats {
 pub fn run() {
     let Some(fb) = display::take_framebuffer() else {
         kprintln!("wm: no framebuffer, no desktop");
+        #[cfg(feature = "raspi")]
+        crate::rpi::led::finish();
         return;
     };
     let t0 = timer::now_ns();
@@ -265,6 +267,8 @@ pub fn run() {
         Err(fb) => {
             kprintln!("wm: out of memory for the desktop, text console instead");
             display::console_fallback(fb);
+            #[cfg(feature = "raspi")]
+            crate::rpi::led::finish();
             return;
         }
     };
@@ -272,6 +276,8 @@ pub fn run() {
         "wm: desktop up in {} ms (wallpaper + blur + first frame + fade)",
         (timer::now_ns() - t0) / 1_000_000
     );
+    #[cfg(feature = "raspi")]
+    crate::rpi::led::finish();
     // A display mode saved in Settings.
     let res = prefs::get().resolution;
     if res != (theme::screen_w(), theme::screen_h()) {

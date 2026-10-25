@@ -19,7 +19,7 @@ Files: `kernel/src/platform.rs` (the board table), `kernel/src/el.S` (EL2 to EL1
 | Boot at EL2, drop to EL1, MMU on, higher-half kernel, 4 CPUs through the firmware's spin table | **runs** on qemu raspi4b (TCG); the EL2 and spin-table paths are exactly what the real firmware does |
 | PL011 console, GIC-400, generic timer, scheduler, userspace, the shell, the whole desktop | **runs** on qemu raspi4b |
 | Firmware mailbox, framebuffer (format, pitch and address from the firmware's answer) | **runs** on qemu raspi4b; the answer's shape is unit-tested against hostile values |
-| Boot log and crash screen on HDMI, ACT LED, sign-of-life band | **runs** on qemu (screendumps are checked by the test); the LED and real HDMI scan-out are untested |
+| Boot log and crash screen on HDMI, ACT LED codes, sign-of-life band | **runs** on qemu (screendumps are checked by the test; qemu models the GPIO block, so the test samples the LED pin: marker and codes, solid on, flashing after a crash); the LED's brightness and timing on a real board, and real HDMI scan-out, are untested |
 | SD card (SDHCI, polled PIO), as `/dev/mmcblk0`, milkfs on it | **runs** on qemu (its EMMC controller); **untested** on EMMC2 of a real board |
 | RAM from the device tree, several banks and holes | **runs** on qemu (two banks and a hole, the GPU's); 4 GB / 8 GB layouts are unit-tested and the allocator above 4 GiB is tested on qemu virt |
 | Hardware random generator (RNG200) | **untested** (qemu does not model it); falls back to the jitter-seeded CSPRNG |
@@ -72,6 +72,7 @@ them, so every existing option works unchanged:
 | `milk.sdwrite=1` | allow writes to the SD card (`/dev/mmcblk0` is read-only otherwise: a card that also boots Raspberry Pi OS must not be written by accident; Disk Utility, `disks` and milkfs all see it read-only) |
 | `milk.disable=pcie,usb,genet,sdhci,rng` | start without a driver that misbehaves on a real board (edit `cmdline.txt`, no rebuild): `pcie` (and with it USB), `usb`, `genet`, `sdhci`, `rng` |
 | `milk.fbscale=N` | magnify the boot log and crash screen font N times (default 1; 2 from 1600 px wide) |
+| `milk.ledcodes=0` | no ACT LED progress codes (the LED just turns on at the start of `kmain`; the `led: stage` log lines stay). Default on; the codes add about 9 s to a boot |
 | `milk.crashtest=early` / `late` | panic on purpose right after the display is up / once the desktop has been up 8 s (tests the crash screens); `late-off` / `late-reset`: the desktop's Shut Down / Restart after 5 s (tests the power paths) |
 
 ## Putting it on a card
@@ -188,8 +189,7 @@ There is no serial cable in this setup, so the kernel makes the screen the conso
    text console, then "milkOS stopped.". If the crash comes before the desktop, the boot log is still on
    screen and the dump is appended to it: the screen is not cleared. The compositor is stopped so it does not paint over it.
    ![crash screen](screenshots/raspberry-pi-crash-screen.png)
-4. **The green ACT LED** is on while the kernel runs and flashes at about 5 Hz after a crash, so "on" and
-   "flashing" tell apart even if nothing reached the screen.
+4. **The green ACT LED** is a progress readout you can count with nothing else attached: see the next section.
 5. `milk.crashtest=early|late` triggers a panic on purpose so you can see the screens once.
 
 **An option for later, not built:** keeping the log on the card. The boot partition is FAT, which the kernel
@@ -197,7 +197,56 @@ can read (`fs/fat.rs`) and could write; a ring of the last log lines flushed to 
 crash, and once a second while booting) would survive a reboot, so a board that dies before the screen works
 could still be diagnosed from another computer. It needs the SD driver to be trusted on real hardware first
 (it is the thing it would depend on), which is why it waits. A second cheap option: the same text as beeps or
-more LED patterns for failures before the framebuffer.
+more LED patterns for failures before the framebuffer (the stage codes above already cover the milestones).
+
+## Reading the ACT LED (no screen, no serial cable)
+
+The green ACT LED (GPIO 42) is the only output that needs nothing but the GPIO block. From the first line of
+`kmain` it is on; after memory is up the kernel shows a **start marker** and then **one burst of pulses per
+boot milestone**, counted by eye. Whatever the LED does *before* the start marker is the Raspberry Pi firmware's,
+not milkOS's.
+
+**What milkOS shows, in order** (pulse = 0.1 s on, 0.1 s off; after a burst the LED is dark for 0.3 s):
+
+| you see | means |
+|---|---|
+| one **long** pulse (1 s on, with half a second of dark either side) | **start marker**: the firmware handed over, the kernel runs, memory is up. Everything below comes after it |
+| 1 pulse | stage 1, **memory**: RAM taken from the device tree (this burst follows the marker straight away) |
+| 2 pulses | stage 2, **mailbox**: the VideoCore answered |
+| 3 pulses | stage 3, **framebuffer**: a framebuffer was allocated (the green band is on the screen, if one is attached) |
+| 4 pulses | stage 4, **interrupts**: the interrupt controller and the timer are initialised |
+| 5 pulses | stage 5, **SD card**: the card was found and read |
+| 6 pulses | stage 6, **scheduler**: the scheduler runs and the other three CPUs are started |
+| 7 pulses | stage 7, **userspace**: the first user process (`init`) was started |
+| **solid on** | the desktop is up (or there is no framebuffer and so no desktop to wait for): **running fine** |
+| **fast steady flashing**, 5 times a second, forever | **crashed** (a panic or an exception), at any point |
+
+A good boot is: marker, 1, 2, 3, 4, 5, 6, 7 pulses (about 9 s in all), then solid on. The kernel prints
+the same thing as `led: stage N name` lines in the boot log, so the log and the LED always agree.
+
+**A milestone that went wrong repeats its number slowly**: the same N pulses, but 0.4 s on and 0.4 s off,
+with 0.8 s of dark after. The boot goes on and the following stages still show (a slow code is a
+report, not a stop). So a slow "3" means the framebuffer failed (the mailbox timed out, or the firmware
+refused the mode) and a slow "5" means no usable SD card (none inserted, or it did not answer a bounded
+wait). A slow "2" means the mailbox did not answer, so a slow "3" follows it. After the last code the LED is dark
+until the next one: **if it goes dark after N pulses and stays dark, the kernel is stuck after stage N**
+(inside the next step). Solid on from the very start with *no* marker means `kmain` started and then hung
+before memory was up.
+
+**Telling it from the firmware.** Before it starts the kernel the Pi 4's bootloader uses the same LED:
+a *slow* repeating group of N flashes with a long pause between groups is a bootloader error, and none of our
+patterns look like that (ours start with the 1 s marker and are not repeated). Three well-known ones on the Pi 4:
+**4 flashes** = `start*.elf` not found or not supported (wrong firmware files for the board), **7 flashes**
+= the kernel image was not found (`kernel8.img` / `kernel=` in `config.txt`), **8 flashes** = SDRAM not
+recognised. For all the others see the Raspberry Pi bootloader documentation (the "LED warning flash codes").
+While the firmware loads files from the card, the LED also **flickers irregularly** (SD activity); that stops
+when the kernel takes over. So: irregular flicker, then the **1 s marker**, means
+the firmware loaded milkOS and the kernel runs; groups of N flashes that repeat and never reach a marker mean the
+firmware stopped before our kernel.
+
+**Turning it off.** `milk.ledcodes=0` in `cmdline.txt` skips the marker and the bursts (the LED then only turns on at
+`kmain` and goes on flashing after a crash). The codes busy-wait on the CPU's generic counter, so they need no
+allocator, timer interrupt or scheduler; the pattern language itself is `rpikit::ledcode` (host-tested).
 
 ## The drivers
 
@@ -229,7 +278,7 @@ mounts it from the emulated card, writes a file, takes a snapshot, reboots and f
 bounded waits, mixed into the CSPRNG's pool at seed time like virtio-rng. If the tree has no such node it is skipped, and
 the "jitter only" warning appears.
 
-**LED** (`rpi/led.rs`): GPIO 42 as an output, on at the start of `kmain`.
+**LED** (`rpi/led.rs`, patterns in `rpikit::ledcode`): GPIO 42 as an output, on at the start of `kmain`, then the progress codes (see "Reading the ACT LED"); fast flashing after a crash.
 
 **PCIe + USB** (`rpi/pcie.rs`, `pci.rs`, `usb/`, `rpikit::{pci,usb}`). The four USB-A ports of a Pi 4 are root ports of a VIA VL805
 xHCI controller on the BCM2711's PCIe x1 link. Bring-up (`rpi/pcie.rs`, **untested**): reset the bridge, SerDes out of
@@ -284,7 +333,7 @@ Not done: the address filter, interrupt-driven transmit completion, checksum off
 1. **Boot with the screen only.** Build with `scripts/pi-bootdir.sh`, copy, power on. Expected: the green band within a second
    (the firmware has to load a 30 MB file first), then the boot log scrolling, then the splash-less desktop. If the band appears
    and the log stops, the crash screen or the last line says where; the LED flashes after a crash. If nothing appears at all:
-   check the LED (on = the kernel ran), `config.txt` (arm_64bit, kernel name, no KMS overlay), the card's other files.
+   check the LED (the 1 s start marker = the kernel ran; see "Reading the ACT LED"), `config.txt` (arm_64bit, kernel name, no KMS overlay), the card's other files.
 2. **SD card.** Look for `[sdhci] 0xfe340000: card ready`. If EMMC2 does not answer, the log says at which command; the base clock
    is logged by the mailbox (`clock_rate`). A card without a milkfs partition: the desktop runs from RAM.
 3. **USB.** Look for the `[pcie]` lines (link up status word), `[pci]` (the VL805: vendor 1106, device 3483, class 0c0330), `[usb] xHCI`, then

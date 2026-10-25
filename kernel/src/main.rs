@@ -109,6 +109,8 @@ pub extern "C" fn kmain() -> ! {
     percpu::init_boot();
     // MMU + caches before anything takes a lock (atomics hang on Device memory).
     mem::init();
+    #[cfg(feature = "raspi")]
+    rpi::led::start_codes();
     display::init();
     kprintln!("milkOS {VERSION} booting...");
     kprintln!("hello from the kernel");
@@ -117,6 +119,8 @@ pub extern "C" fn kmain() -> ! {
     gic::init();
     timer::init();
     uart::init();
+    #[cfg(feature = "raspi")]
+    rpi::led::stage(rpikit::ledcode::Stage::Interrupts, true);
     #[cfg(feature = "raspi")]
     rpi::init();
     udrv::init_policy();
@@ -135,6 +139,8 @@ pub extern "C" fn kmain() -> ! {
     fs::selftest::run();
     sched::init();
     smp::init();
+    #[cfg(feature = "raspi")]
+    rpi::led::stage(rpikit::ledcode::Stage::Scheduler, true);
     if selftest::wants(selftest::SCHED) {
         sched::selftest::run();
     }
@@ -154,6 +160,8 @@ pub extern "C" fn kmain() -> ! {
     udrv::init_files();
     proc::init();
     proc::start_init();
+    #[cfg(feature = "raspi")]
+    rpi::led::stage(rpikit::ledcode::Stage::Userspace, true);
     fs::start_threads();
     usb::start();
 

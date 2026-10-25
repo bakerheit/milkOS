@@ -601,7 +601,9 @@ pub fn init() {
         let dev: blockdev::BlockRef = Arc::new(dev);
         kprintln!("[sdhci] {}", blockdev::describe(&dev));
         blockdev::register(dev);
+        super::led::stage(rpikit::ledcode::Stage::SdCard, true);
         return;
     }
     kprintln!("[sdhci] no SD card");
+    super::led::stage(rpikit::ledcode::Stage::SdCard, false);
 }

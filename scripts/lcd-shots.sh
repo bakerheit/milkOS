@@ -13,7 +13,7 @@ TMP="$(mktemp -d "${TMPDIR:-/tmp}/milk-lcd-shots.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 HOST="$(rustc -vV | sed -n 's/^host: //p')"
 MILK_LCD_SHOTS="$TMP" cargo test -q -p rpikit --lib --target "$HOST" --target-dir target/host-tests lcdtests >/dev/null
-for n in boot-log crash-screen desktop desktop-pan; do
+for n in boot-log crash-screen desktop desktop-pan probe-number probe-card; do
   python3 -I scripts/png_pack.py "$TMP/raspberry-pi-lcd-$n.png" "$OUT/raspberry-pi-lcd-$n.png"
 done
 ls -l "$OUT"/raspberry-pi-lcd-*.png

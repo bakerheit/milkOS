@@ -17,7 +17,7 @@ use crate::lcdsim::{SimPanel, SimTouch};
 use crate::testpng;
 use crate::touch::{self, Cal, Channel, Event, Raw, Tracker};
 
-const KINDS: [Controller; 3] = [Controller::Ili9486, Controller::Ili9488, Controller::St7796];
+const KINDS: [Controller; 10] = lcd::CONTROLLERS;
 const ROTS: [Rotation; 4] = [Rotation::Deg0, Rotation::Deg90, Rotation::Deg180, Rotation::Deg270];
 
 fn gradient(w: usize, h: usize) -> Vec<u32> {
@@ -71,8 +71,27 @@ fn lcd_options_parse() {
     assert_eq!(Controller::parse(b"ili9486"), Some(Controller::Ili9486));
     assert_eq!(Controller::parse(b"ILI9488"), Some(Controller::Ili9488));
     assert_eq!(Controller::parse(b"st7796"), Some(Controller::St7796));
-    assert_eq!(Controller::parse(b"st7789"), None);
+    assert_eq!(Controller::parse(b"st7789"), Some(Controller::St7789));
+    assert_eq!(Controller::parse(b"st7789x"), None);
+    assert_eq!(Controller::parse(b"ili948"), None);
     assert_eq!(Controller::parse(b""), None);
+    // Every controller's own name parses back to it, in any case; the aliases name the same family.
+    for k in KINDS {
+        assert_eq!(Controller::parse(k.name().as_bytes()), Some(k));
+        assert_eq!(Controller::parse(k.name().to_ascii_uppercase().as_bytes()), Some(k));
+    }
+    assert_eq!(Controller::parse(b"ILI9343"), Some(Controller::Ili9341));
+    assert_eq!(Controller::parse(b"hx8357d"), Some(Controller::Hx8357));
+    assert_eq!(Controller::parse(b"mpi3501"), Some(Controller::Ili9486P));
+    let mut names: Vec<&str> = KINDS.iter().map(|k| k.name()).collect();
+    names.sort();
+    names.dedup();
+    assert_eq!(names.len(), KINDS.len());
+    assert_eq!(lcd::parse_spi_mode(b"0"), Some(0));
+    assert_eq!(lcd::parse_spi_mode(b"3"), Some(3));
+    assert_eq!(lcd::parse_spi_mode(b"4"), None);
+    assert_eq!(lcd::parse_spi_mode(b"03"), None);
+    assert_eq!(lcd::parse_spi_mode(b""), None);
     assert_eq!(Rotation::parse(b"90"), Some(Rotation::Deg90));
     assert_eq!(Rotation::parse(b"45"), None);
     assert_eq!(Rotation::parse(b"090"), None);
@@ -144,21 +163,82 @@ fn ili9486_init_stream_is_16_bit_words() {
 
 #[test]
 fn eight_bit_controllers_init() {
-    for (kind, colmod) in [(Controller::Ili9488, 0x66), (Controller::St7796, 0x55)] {
+    for kind in KINDS.into_iter().filter(|k| !k.word16()) {
         let cfg = Config::new(kind);
         let p = up(&cfg);
-        assert_eq!(p.colmod, colmod);
-        assert!(p.display_on);
+        // 18-bit pixels (COLMOD 0x66) for the controllers that need them over SPI, 16-bit otherwise.
+        assert_eq!(p.colmod, if kind.bytes_per_pixel() == 3 { 0x66 } else { 0x55 }, "{kind:?}");
+        assert_eq!(p.colmod, kind.colmod());
+        assert!(p.display_on && !p.sleeping, "{kind:?}");
         // 8-bit framing: a command is one byte, parameters go out as they are.
-        assert!(p.log.iter().any(|(d, b)| !d && b == &[0x36]));
         let i = p.log.iter().position(|(d, b)| !d && b == &[0x36]).unwrap();
         assert_eq!(p.log[i + 1], (true, std::vec![0x28]));
-        assert_eq!(p.inverted, kind == Controller::St7796);
+        assert_eq!(p.inverted, kind.usually_inverted(), "{kind:?}");
+        assert_eq!(p.inverted, matches!(kind, Controller::St7796 | Controller::St7789));
+        // Every plain controller starts with a software reset after the hardware one.
+        assert_eq!(p.log[0], (false, std::vec![0x01]), "{kind:?}");
+        assert_eq!(p.resets, [true, false, true]);
     }
     // The ST7796 unlocks its second command set before using it, and locks it again.
     let p = up(&Config::new(Controller::St7796));
     let f0: Vec<&Vec<u8>> = p.log.iter().filter(|(d, b)| *d && b.len() == 1 && matches!(b[0], 0xc3 | 0x96 | 0x3c | 0x69)).map(|(_, b)| b).collect();
     assert_eq!(f0, [&std::vec![0xc3], &std::vec![0x96], &std::vec![0x3c], &std::vec![0x69]]);
+}
+
+#[test]
+fn every_init_stream_is_its_own_and_complete() {
+    // Every controller's stream differs from every other's (a copy-paste of one stream under two names
+    // would make two probe set-ups the same set-up), is bounded, and ends with the common tail.
+    let mut streams: Vec<Vec<(bool, Vec<u8>)>> = Vec::new();
+    for kind in KINDS {
+        let p = up(&Config::new(kind));
+        assert!(p.log.len() > 8 && p.log.len() < 120, "{kind:?}: {}", p.log.len());
+        assert!(p.waited_ms >= 150 && p.waited_ms < 1200, "{kind:?}: {} ms", p.waited_ms);
+        let cmd = |b: &[u8]| *b.last().unwrap();
+        let cmds: Vec<u8> = p.log.iter().filter(|(d, _)| !d).map(|(_, b)| cmd(b)).collect();
+        for needed in [0x01u8, 0x11, 0x36, 0x13, 0x29] {
+            assert!(cmds.contains(&needed), "{kind:?} lacks command {needed:#x}");
+        }
+        // The display goes on last, after sleep out.
+        assert_eq!(*cmds.last().unwrap(), 0x29);
+        assert!(cmds.iter().position(|&c| c == 0x11) < cmds.iter().position(|&c| c == 0x29));
+        for other in &streams {
+            assert!(other != &p.log, "{kind:?} has the stream of another controller");
+        }
+        streams.push(p.log);
+    }
+    // The three ILI9486 wirings share a chip, so a common core and nothing else in common.
+    let a = up(&Config::new(Controller::Ili9486P));
+    let b = up(&Config::new(Controller::Ili9486P18));
+    let colmod = |p: &SimPanel| p.log.iter().position(|(d, x)| !d && x == &[0x3a]).map(|i| p.log[i + 1].1.clone());
+    assert_eq!(colmod(&a), Some(std::vec![0x55]));
+    assert_eq!(colmod(&b), Some(std::vec![0x66]));
+}
+
+#[test]
+fn small_memory_controllers_draw_320_by_240() {
+    for kind in [Controller::Ili9341, Controller::St7789] {
+        assert_eq!(kind.native(), (240, 320));
+        let cfg = Config::new(kind);
+        assert_eq!((cfg.width(), cfg.height()), (320, 240), "{kind:?}");
+        let p = Config { rotation: Rotation::Deg0, ..cfg };
+        assert_eq!((p.width(), p.height()), (240, 320));
+        let mut sim = up(&cfg);
+        // A window that only a 480x320 memory has is refused by the driver before anything is sent.
+        assert!(!lcd::window(&cfg, &mut sim, Rect::new(0, 0, 480, 320)));
+        assert!(!lcd::window(&cfg, &mut sim, Rect::new(0, 0, 321, 1)));
+        assert!(lcd::window(&cfg, &mut sim, Rect::new(0, 0, 320, 240)));
+        assert!(sim.errors.is_empty(), "{:?}", sim.errors);
+    }
+    // The model refuses a window past the memory (a driver that forgot the smaller size).
+    let mut sim = SimPanel::new(Controller::Ili9341);
+    sim.write(false, &[0x2a]);
+    sim.write(true, &[0, 0, 0x01, 0xdf]); // column 479
+    sim.write(false, &[0x29]);
+    assert!(sim.errors.contains(&"window outside the memory"), "{:?}", sim.errors);
+    for kind in KINDS.into_iter().filter(|k| k.native() == (320, 480)) {
+        assert_eq!((Config::new(kind).width(), Config::new(kind).height()), (480, 320));
+    }
 }
 
 #[test]
@@ -216,6 +296,30 @@ fn pixel_packing() {
     assert_eq!(&out[..n], [0xf8, 0x00, 0x00, 0x1f, 0x11, 0x06]);
     let n = lcd::pack(Controller::Ili9488, &[0x00ff_0000, 0x0012_3456], &mut out);
     assert_eq!(&out[..n], [0xfc, 0x00, 0x00, 0x10, 0x34, 0x54]);
+    // 18-bit pixels: red, green, blue each in the top six bits of its own byte, three bytes a pixel;
+    // the plain ILI9486 with 18-bit pixels packs the same way; every other controller takes RGB565.
+    let n = lcd::pack(Controller::Ili9486P18, &[0x00ff_ffff, 0x0000_0003, 0x00fc_0000, 0x0001_0203], &mut out);
+    assert_eq!(n, 12);
+    assert_eq!(&out[..n], [0xfc, 0xfc, 0xfc, 0x00, 0x00, 0x00, 0xfc, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    for k in KINDS {
+        let n = lcd::pack(k, &[0x00ff_0000, 0x0000_00ff], &mut out);
+        assert_eq!(n, 2 * k.bytes_per_pixel(), "{k:?}");
+        if k.bytes_per_pixel() == 2 {
+            assert_eq!(&out[..n], [0xf8, 0x00, 0x00, 0x1f], "{k:?}");
+        } else {
+            assert_eq!(&out[..n], [0xfc, 0x00, 0x00, 0x00, 0x00, 0xfc], "{k:?}");
+        }
+        assert_eq!(k.bytes_per_pixel() == 3, matches!(k, Controller::Ili9488 | Controller::Ili9486P18));
+    }
+    // Packing never writes past what it reports, and an empty or short output is not a panic.
+    assert_eq!(lcd::pack(Controller::Ili9488, &[], &mut out), 0);
+    let mut small = [0xaau8; 4];
+    let n = lcd::pack(Controller::Ili9486, &[0xffffff, 0xffffff, 0xffffff], &mut small);
+    assert_eq!(n, 4, "only the whole pixels that fit");
+    assert_eq!(small, [0xff; 4]);
+    let mut small = [0xaau8; 5];
+    assert_eq!(lcd::pack(Controller::Ili9488, &[0xffffff, 0xffffff], &mut small), 3);
+    assert_eq!(small, [0xfc, 0xfc, 0xfc, 0xaa, 0xaa]);
 }
 
 // ---- drawing --------------------------------------------------------------------------------------
@@ -312,10 +416,10 @@ fn chunks_stay_small_and_whole_rows() {
         let bpp = kind.bytes_per_pixel();
         let mut total = 0;
         for (d, b) in p.log.iter().skip(5) {
-            assert!(*d && b.len() <= 2048 && b.len() % (480 * bpp) == 0, "{kind:?} {}", b.len());
+            assert!(*d && b.len() <= 2048 && b.len() % (cfg.width() * bpp) == 0, "{kind:?} {}", b.len());
             total += b.len();
         }
-        assert_eq!(total, 480 * 320 * bpp);
+        assert_eq!(total, cfg.width() * cfg.height() * bpp);
     }
 }
 
@@ -834,7 +938,9 @@ fn boot_log() -> Vec<(&'static str, u32)> {
 fn boot_log_on_the_panel() {
     let img = render_text(&boot_log());
     let want: Vec<u32> = img.iter().map(|&c| quantize(Controller::Ili9486, c)).collect();
-    for kind in KINDS {
+    // (The 480x320 picture is for the controllers with 480x320 landscape memory; the small ones have
+    // their own test.)
+    for kind in KINDS.into_iter().filter(|k| k.native() == (320, 480)) {
         let cfg = Config::new(kind);
         let seen = through_panel(&cfg, &mut Pixels { px: &img, width: 480 });
         let want: Vec<u32> = img.iter().map(|&c| quantize(kind, c)).collect();
@@ -1028,48 +1134,155 @@ fn garbage_never_panics_the_model_or_the_driver() {
 
 mod probe {
     use super::*;
-    use crate::lcdprobe::{self, BARS, ProbeCard, ROTATIONS, SETUPS, WHITE};
+    use crate::lcdprobe::{
+        self, BACKLIGHT_PINS, BARS, DEFAULT_PINS, FLASHES, HOLD_MS, NumberCard, ProbeCard,
+        ProbeOptions, SETUPS, SETUPS_WITHOUT_PIN_ROUND, Setup, WHITE,
+    };
 
-    fn card(i: usize, rot: Rotation) -> (Config, ProbeCard) {
-        let cfg = SETUPS[i].config(rot);
-        (cfg, ProbeCard::new(i + 1, SETUPS.len(), &SETUPS[i], rot, cfg.width(), cfg.height()))
+    const PINS: (u8, u8) = DEFAULT_PINS;
+
+    fn text_card(i: usize) -> (Config, ProbeCard) {
+        let cfg = SETUPS[i].config();
+        (cfg, ProbeCard::new(i + 1, SETUPS.len(), &SETUPS[i], PINS, cfg.width(), cfg.height()))
     }
 
-    /// What the card looks like once the controller has taken the colours.
-    fn expected(cfg: &Config, c: &ProbeCard) -> Vec<u32> {
+    fn number_card(i: usize) -> (Config, NumberCard) {
+        let cfg = SETUPS[i].config();
+        (cfg, NumberCard::new(i + 1, SETUPS.len(), &SETUPS[i], cfg.width(), cfg.height()))
+    }
+
+    /// What a card looks like once the controller has taken the colours.
+    fn expected(cfg: &Config, px: impl Fn(usize, usize) -> u32) -> Vec<u32> {
         let (w, h) = (cfg.width(), cfg.height());
         let mut v = Vec::new();
         for y in 0..h {
             for x in 0..w {
-                v.push(quantize(cfg.controller, c.pixel(x, y)));
+                v.push(quantize(cfg.controller, px(x, y)));
             }
         }
         v
     }
 
+    fn never() -> impl FnMut() -> bool {
+        || false
+    }
+
     #[test]
-    fn every_setup_draws_its_card_through_its_own_init_stream() {
+    fn the_matrix_covers_what_it_should_in_the_order_it_should() {
+        let n = SETUPS.len();
+        assert!((18..=26).contains(&n), "{n} set-ups");
+        // Distinct.
         for (i, s) in SETUPS.iter().enumerate() {
-            for rot in ROTATIONS {
-                let (cfg, mut c) = card(i, rot);
-                let mut p = up(&cfg);
-                assert!(lcd::draw_rect(&cfg, &mut p, full(&cfg), &mut c), "{i} {rot:?}");
-                assert!(p.errors.is_empty(), "{:?}", p.errors);
-                assert_eq!(p.kind, s.controller);
-                assert_eq!(p.visible_for(&cfg), expected(&cfg, &c), "setup {i} {rot:?}");
-                // The 16-bit framing is the ILI9486's only.
-                let first_cmd = p.log.iter().find(|(d, _)| !*d).unwrap();
-                assert_eq!(first_cmd.1.len(), if s.controller.word16() { 2 } else { 1 });
+            for t in &SETUPS[i + 1..] {
+                assert_ne!(s, t);
             }
+        }
+        // Every controller is tried first at the slow clock, SPI mode 0, default pins, before any
+        // fast clock, mode 3 or other pins; and in the order of the controller list.
+        let first_fast = SETUPS.iter().position(|s| !s.is_slow()).unwrap();
+        let slow_first: Vec<Controller> = SETUPS[..lcd::CONTROLLERS.len()].iter().map(|s| s.controller).collect();
+        assert_eq!(slow_first, lcd::CONTROLLERS);
+        assert!(first_fast >= lcd::CONTROLLERS.len());
+        for s in &SETUPS[..lcd::CONTROLLERS.len()] {
+            assert_eq!((s.hz, s.mode, s.pins), (lcdprobe::MHZ4, 0, None), "{s:?}");
+        }
+        // The fast clocks only for the likeliest three controllers.
+        let mut fast: Vec<Controller> = SETUPS.iter().filter(|s| s.hz > lcdprobe::MHZ4).map(|s| s.controller).collect();
+        fast.sort_by_key(|c| c.name());
+        fast.dedup();
+        assert!(fast.len() <= 3, "{fast:?}");
+        // SPI modes 0 and 3 only; clocks 4, 16, 32 MHz only.
+        assert!(SETUPS.iter().all(|s| s.mode == 0 || s.mode == 3));
+        assert!(SETUPS.iter().any(|s| s.mode == 3));
+        assert!(SETUPS.iter().all(|s| [lcdprobe::MHZ4, lcdprobe::MHZ16, lcdprobe::MHZ32].contains(&s.hz)));
+        assert!(SETUPS.iter().any(|s| s.hz == lcdprobe::MHZ32));
+        // Pin pairs: all in the tail (so `milk.lcd_probe_pins=0` cuts them), none the default or the touch
+        // pen line, distinct pins, in the header range, for at most two controllers, slow, mode 0.
+        assert!(SETUPS[..SETUPS_WITHOUT_PIN_ROUND].iter().all(|s| s.pins.is_none()));
+        assert!(SETUPS[SETUPS_WITHOUT_PIN_ROUND..].iter().all(|s| s.pins.is_some()));
+        assert_eq!(SETUPS_WITHOUT_PIN_ROUND, 17);
+        let mut pin_ctrls: Vec<Controller> = Vec::new();
+        for s in &SETUPS[SETUPS_WITHOUT_PIN_ROUND..] {
+            let (dc, rst) = s.pins.unwrap();
+            assert_ne!((dc, rst), DEFAULT_PINS);
+            assert!(dc != rst && (2..=27).contains(&dc) && (2..=27).contains(&rst));
+            assert!(dc != 17 && rst != 17, "17 is the touch pen line");
+            assert!(s.is_slow() && s.mode == 0);
+            if !pin_ctrls.contains(&s.controller) {
+                pin_ctrls.push(s.controller);
+            }
+        }
+        assert_eq!(pin_ctrls.len(), 2);
+        // The brief's pairs are in.
+        let pairs: Vec<(u8, u8)> = SETUPS.iter().filter_map(|s| s.pins).collect();
+        for want in [(22, 27), (25, 24)] {
+            assert!(pairs.contains(&want), "{want:?}");
+        }
+        // The backlight pins are not the default D/C and reset, nor the touch pen line.
+        assert!(BACKLIGHT_PINS == [18, 27]);
+        assert!(BACKLIGHT_PINS.iter().all(|&b| b != PINS.0 && b != PINS.1 && b != 17));
+    }
+
+    #[test]
+    fn every_setup_shows_its_three_signs_through_its_own_init_stream() {
+        for (i, s) in SETUPS.iter().enumerate() {
+            let cfg = s.config();
+            let (w, h) = (cfg.width(), cfg.height());
+            let mut p = up(&cfg);
+            assert_eq!(p.kind, s.controller);
+            // The 16-bit framing is the ILI9486's only.
+            let first_cmd = p.log.iter().find(|(d, _)| !*d).unwrap();
+            assert_eq!(first_cmd.1.len(), if s.controller.word16() { 2 } else { 1 }, "{i}");
+            // 1. The number card.
+            let (_, mut nc) = number_card(i);
+            let rows = lcdprobe::draw_banded(&cfg, &mut p, &mut nc, &mut never());
+            assert_eq!(rows, Some(h), "{i}");
+            assert_eq!(p.visible_for(&cfg), expected(&cfg, |x, y| nc.pixel(x, y)), "number card {i}");
+            // 2. The four flashes: the whole screen one colour each.
+            for c in FLASHES {
+                let rows = lcdprobe::draw_banded(&cfg, &mut p, &mut lcd::Solid(c), &mut never());
+                assert_eq!(rows, Some(h));
+                let seen = p.visible_for(&cfg);
+                assert_eq!(seen.len(), w * h);
+                assert!(seen.iter().all(|&v| v == quantize(s.controller, c)), "flash {c:#08x} at {i}");
+            }
+            // 3. The text card.
+            let (_, mut tc) = text_card(i);
+            assert!(lcd::draw_rect(&cfg, &mut p, Rect::new(0, 0, w, h), &mut tc));
+            assert!(p.errors.is_empty(), "{:?}", p.errors);
+            assert_eq!(p.visible_for(&cfg), expected(&cfg, |x, y| tc.pixel(x, y)), "text card {i}");
+            // The text card fills every pixel of the addressed area.
+            assert_eq!(p.pixels_written, (2 + FLASHES.len()) * w * h);
         }
     }
 
     #[test]
-    fn the_card_has_a_label_options_bars_and_a_border() {
+    fn the_cards_as_pictures() {
+        // The number card of set-up 14 and the text card of set-up 1, for the doc (MILK_LCD_SHOTS=dir).
+        let (cfg, nc) = number_card(13);
+        let img: Vec<u32> = expected(&cfg, |x, y| nc.pixel(x, y));
+        maybe_save("raspberry-pi-lcd-probe-number.png", cfg.width(), cfg.height(), &img);
+        let (cfg, tc) = text_card(0);
+        let img: Vec<u32> = expected(&cfg, |x, y| tc.pixel(x, y));
+        maybe_save("raspberry-pi-lcd-probe-card.png", cfg.width(), cfg.height(), &img);
+    }
+
+    #[test]
+    fn the_flashes_have_distinct_colours_in_the_order_red_green_blue_white() {
+        assert_eq!(FLASHES, [0xff0000, 0x00ff00, 0x0000ff, 0xffffff]);
+        // After the controller's rounding they are still four different, saturated colours.
+        for k in KINDS {
+            let q: Vec<u32> = FLASHES.iter().map(|&c| quantize(k, c)).collect();
+            assert_eq!(q, [0xff0000, 0x00ff00, 0x0000ff, 0xffffff], "{k:?}");
+        }
+    }
+
+    #[test]
+    fn the_text_card_has_a_label_options_bars_and_a_border() {
         for i in 0..SETUPS.len() {
-            let (cfg, c) = card(i, Rotation::Deg90);
+            let (cfg, c) = text_card(i);
             let (w, h) = (cfg.width(), cfg.height());
-            assert_eq!((w, h), (480, 320));
+            assert!(w == 480 && h == 320 || w == 320 && h == 240, "{w}x{h}");
             // Border all round.
             for x in [0, 3, w - 1, w - 4] {
                 assert_eq!(c.pixel(x, h / 2), WHITE);
@@ -1078,104 +1291,279 @@ mod probe {
                 assert_eq!(c.pixel(w / 2, y), WHITE);
             }
             // Bars: the five colours, left to right, on a row in the middle of them.
+            assert!(c.bars_top() + 40 < h, "{i}: bars at {} of {h}", c.bars_top());
             let y = (c.bars_top() + h - 12) / 2;
             let xs: Vec<u32> = (0..BARS.len()).map(|k| c.pixel(12 + (w - 24) * (2 * k + 1) / (2 * BARS.len()), y)).collect();
             assert_eq!(xs, BARS);
-            // Text: lit pixels in the name's rows (big), in the options' rows, none above the bars outside text.
+            // Text: lit pixels in the name's rows (big), in the option rows, above the bars.
             let lit = |y0: usize, y1: usize| (y0..y1).map(|y| (0..w).filter(|&x| c.pixel(x, y) == WHITE).count()).sum::<usize>();
-            assert!(lit(12, 12 + 42) > 600, "name too faint: {}", lit(12, 54));
-            assert!(lit(60, c.bars_top() - 4) > 300, "options too faint");
+            assert!(lit(12, 12 + 28) > 400, "name too faint: {}", lit(12, 40));
+            assert!(lit(48, c.bars_top() - 2) > 300, "options too faint");
             // The name is wide but fits.
-            let name_right = (0..w).rev().find(|&x| (12..54).any(|y| x < w - 5 && c.pixel(x, y) == WHITE)).unwrap();
+            let name_right = (0..w).rev().find(|&x| (12..40).any(|y| x < w - 5 && c.pixel(x, y) == WHITE)).unwrap();
             assert!(name_right < w - 12, "name runs into the border");
         }
     }
 
     #[test]
+    fn the_number_card_is_a_big_number_on_black() {
+        for i in 0..SETUPS.len() {
+            let (cfg, c) = number_card(i);
+            let (w, h) = (cfg.width(), cfg.height());
+            // Big: at least 9 px per font pixel (63 px tall) on the 320x240 area, 12 on the 480x320.
+            assert!(c.number_scale() >= if w >= 400 { 12 } else { 9 }, "{i}: scale {}", c.number_scale());
+            // White on black with a border; most of the screen is black.
+            let total = w * h;
+            let white = (0..h).map(|y| (0..w).filter(|&x| c.pixel(x, y) == WHITE).count()).sum::<usize>();
+            let black = (0..h).map(|y| (0..w).filter(|&x| c.pixel(x, y) == 0).count()).sum::<usize>();
+            assert_eq!(white + black, total);
+            assert!(white > total / 25 && white < total / 3, "{white} of {total}");
+            // No other colour appears, so it reads on any glass and under any colour order.
+            assert_eq!(c.pixel(0, 0), WHITE);
+        }
+        // Different set-ups look different, and a two-digit number is as wide as the card allows.
+        let a = number_card(0).1;
+        let b = number_card(12).1;
+        assert!((0..320).any(|y| (0..480).any(|x| a.pixel(x, y) != b.pixel(x, y))));
+        let c = NumberCard::new(21, 21, &SETUPS[20], 480, 320);
+        let right = (0..480 - 8).rev().find(|&x| (12..160).any(|y| c.pixel(x, y) == WHITE)).unwrap();
+        assert!(right < 480 - 12);
+        // Three digits do not overflow either.
+        let c = NumberCard::new(123, 123, &SETUPS[0], 480, 320);
+        assert!(c.number_scale() >= 1);
+    }
+
+    #[test]
     fn the_options_shown_are_the_ones_that_set_the_same_driver_up() {
         for s in SETUPS {
-            for rot in ROTATIONS {
-                let (a, b) = lcdprobe::options(&s, rot);
-                let line = std::format!("{} {}", a.as_str(), b.as_str());
-                let value = |name| cmdline::value(line.as_bytes(), name);
-                assert_eq!(Controller::parse(value("lcd").unwrap()), Some(s.controller), "{line}");
-                assert_eq!(Rotation::parse(value("lcd_rot").unwrap()), Some(rot));
-                match value("lcd_hz") {
-                    None => assert!(!s.is_slow(), "{line}"),
-                    Some(v) => assert_eq!(cmdline::parse_num(v), Some(s.hz as i64)),
+            let line = lcdprobe::options(&s, PINS);
+            let l = line.as_str();
+            let value = |name| cmdline::value(l.as_bytes(), name);
+            assert_eq!(Controller::parse(value("lcd").unwrap()), Some(s.controller), "{l}");
+            assert_eq!(cmdline::number(l.as_bytes(), "lcd_hz"), Some(s.hz as i64), "{l}");
+            match value("lcd_spi_mode") {
+                None => assert_eq!(s.mode, 0, "{l}"),
+                Some(v) => assert_eq!(lcd::parse_spi_mode(v), Some(s.mode), "{l}"),
+            }
+            match (value("lcd_dc"), value("lcd_rst"), s.pins) {
+                (None, None, None) => {}
+                (Some(d), Some(r), Some((dc, rst))) => {
+                    assert_eq!((cmdline::parse_num(d), cmdline::parse_num(r)), (Some(dc as i64), Some(rst as i64)), "{l}");
                 }
-                // Lines fit the screen at the small scale (12 px per character) with margins.
-                assert!(a.as_bytes().len() * 12 + 24 <= 480 && b.as_bytes().len() * 12 + 24 <= 480, "{line}");
+                other => panic!("{l}: {other:?}"),
+            }
+            // No rotation: every set-up is landscape (the default), so nothing to type for it.
+            assert_eq!(value("lcd_rot"), None);
+            // On a card, the words are split over lines that fit the width at the card's small scale.
+            for (w, small) in [(480usize, 2usize), (320, 1)] {
+                let chars = (w - 24) / (6 * small);
+                let (lines, n) = lcdprobe::option_lines(&s, PINS, chars);
+                assert!((1..=4).contains(&n));
+                let joined: Vec<&str> = lines[..n].iter().map(|t| t.as_str()).collect::<Vec<_>>();
+                assert!(joined.iter().all(|t| t.len() <= chars && !t.is_empty()), "{joined:?} in {chars}");
+                assert_eq!(joined.join(" "), l, "no word lost or split");
             }
         }
+        // Pins named by the options (not the set-up) are shown when they are not the usual ones.
+        let s = SETUPS[0];
+        let line = lcdprobe::options(&s, (23, 22));
+        assert_eq!(cmdline::number(line.as_str().as_bytes(), "lcd_dc"), Some(23));
+        assert_eq!(cmdline::number(line.as_str().as_bytes(), "lcd_rst"), Some(22));
+        let line = lcdprobe::options(&SETUPS[17], (23, 22));
+        assert_eq!(cmdline::number(line.as_str().as_bytes(), "lcd_dc"), Some(22), "the set-up's own pins win");
     }
 
     #[test]
-    fn setups_are_distinct_and_labels_are_readable() {
-        for (i, s) in SETUPS.iter().enumerate() {
-            for t in &SETUPS[i + 1..] {
-                assert_ne!(s, t);
-            }
-            let l = lcdprobe::label(s);
+    fn labels_and_texts_are_drawable() {
+        let mut labels: Vec<String> = Vec::new();
+        for s in SETUPS {
+            let l = lcdprobe::label(&s);
             assert!(l.as_bytes().len() <= 12, "{}", l.as_str());
-            assert!(l.as_bytes().iter().all(|&c| c == b' ' || c.is_ascii_alphanumeric() && lcdprobe::glyph(c) != lcdprobe::glyph(0)));
-            let (a, b) = lcdprobe::options(s, Rotation::Deg90);
-            for c in a.as_bytes().iter().chain(b.as_bytes()) {
-                // Every character of the options has its own glyph (not the box).
-                let g = lcdprobe::glyph(*c);
-                assert!(*c == b' ' || g != lcdprobe::glyph(0x01), "no glyph for {}", *c as char);
+            labels.push(String::from(l.as_str()));
+            let all = [
+                String::from(lcdprobe::options(&s, PINS).as_str()),
+                String::from(lcdprobe::detail(&s, PINS).as_str()),
+                String::from(lcdprobe::describe(&s, PINS).as_str()),
+                String::from(l.as_str()),
+            ];
+            for t in &all {
+                for c in t.bytes() {
+                    // Every character has its own glyph (not the box).
+                    let g = lcdprobe::glyph(c);
+                    assert!(c == b' ' || g != lcdprobe::glyph(0x01), "no glyph for {:?} in {t}", c as char);
+                }
             }
+            // The log line says all of it.
+            let d = lcdprobe::describe(&s, PINS);
+            assert!(d.as_str().starts_with(s.controller.name()), "{}", d.as_str());
+            assert!(d.as_str().contains(&std::format!("mode {}", s.mode)));
+            assert!(d.as_str().contains(&std::format!("{} MHz", s.hz / 1_000_000)));
         }
-        let labels: Vec<String> = SETUPS.iter().map(|s| String::from(lcdprobe::label(s).as_str())).collect();
-        let mut sorted = labels.clone();
-        sorted.sort();
-        sorted.dedup();
-        assert_eq!(sorted.len(), labels.len());
+        for c in b"0123456789 MHZSETUPOF" {
+            assert!(*c == b' ' || lcdprobe::glyph(*c) != lcdprobe::glyph(0x01));
+        }
+        // The names are distinct controllers' names; each controller has at least one set-up.
+        for k in KINDS {
+            assert!(SETUPS.iter().any(|s| s.controller == k), "{k:?} is never tried");
+        }
     }
 
     #[test]
-    fn rotating_on_a_set_up_needs_only_the_memory_access_byte() {
-        let (cfg, mut c) = card(1, Rotation::Deg90);
+    fn banded_drawing_stops_at_the_deadline_with_whole_bands() {
+        let cfg = SETUPS[0].config();
+        let (w, h) = (cfg.width(), cfg.height());
+        // Never stopping: everything.
         let mut p = up(&cfg);
-        assert!(lcd::draw_rect(&cfg, &mut p, full(&cfg), &mut c));
-        let resets = p.resets.len();
-        let (cfg2, mut c2) = card(1, Rotation::Deg270);
-        assert!(lcd::command(&cfg2, &mut p, lcd::MADCTL, &[cfg2.madctl()]));
-        assert!(lcd::draw_rect(&cfg2, &mut p, full(&cfg2), &mut c2));
-        assert_eq!(p.resets.len(), resets, "no new reset");
-        assert!(p.errors.is_empty());
-        assert_eq!(p.visible_for(&cfg2), expected(&cfg2, &c2));
-        assert_ne!(expected(&cfg, &c), expected(&cfg2, &c2));
+        assert_eq!(lcdprobe::draw_banded(&cfg, &mut p, &mut lcd::Solid(0xff0000), &mut never()), Some(h));
+        assert!(p.visible_for(&cfg).iter().all(|&v| v == quantize(cfg.controller, 0xff0000)));
+        // Stopping at once: still the first band, so there is always something to see.
+        let mut p = up(&cfg);
+        p.pixels_written = 0;
+        let mut calls = 0;
+        let rows = lcdprobe::draw_banded(&cfg, &mut p, &mut lcd::Solid(0x00ff00), &mut || {
+            calls += 1;
+            true
+        });
+        assert_eq!(rows, Some(lcdprobe::BAND_ROWS));
+        assert_eq!(calls, 1);
+        assert_eq!(p.pixels_written, w * lcdprobe::BAND_ROWS);
+        // The rows drawn are the top ones, in the colour; the rest is untouched.
+        let seen = p.visible_for(&cfg);
+        let green = quantize(cfg.controller, 0x00ff00);
+        assert!(seen[..w * lcdprobe::BAND_ROWS].iter().all(|&v| v == green));
+        assert!(seen[w * lcdprobe::BAND_ROWS..].iter().all(|&v| v == 0));
+        // Stopping after three bands.
+        let mut p = up(&cfg);
+        let mut n = 0;
+        let rows = lcdprobe::draw_banded(&cfg, &mut p, &mut lcd::Solid(0x0000ff), &mut || {
+            n += 1;
+            n > 2
+        });
+        assert_eq!(rows, Some(3 * lcdprobe::BAND_ROWS));
+        // A failing bus is reported, not hidden.
+        let mut p = up(&cfg);
+        p.fail_at = Some(p.log.len() + 5);
+        assert_eq!(lcdprobe::draw_banded(&cfg, &mut p, &mut lcd::Solid(1), &mut never()), None);
+        // Every controller draws bands that tile exactly its own screen height.
+        for k in KINDS {
+            let cfg = Config::new(k);
+            let mut p = up(&cfg);
+            assert_eq!(lcdprobe::draw_banded(&cfg, &mut p, &mut lcd::Solid(0x123456), &mut never()), Some(cfg.height()));
+            assert_eq!(p.pixels_written, cfg.width() * cfg.height());
+            assert!(p.errors.is_empty(), "{:?}", p.errors);
+        }
     }
 
     #[test]
-    fn the_whole_probe_is_bounded() {
-        // Per set-up: init waits (simulated), each card held HOLD_MS, each card's bytes on the wire at the set-up's clock.
-        let mut total_ms = 0u64;
-        for (i, s) in SETUPS.iter().enumerate() {
-            let (cfg, mut c) = card(i, Rotation::Deg90);
-            let mut p = up(&cfg);
-            let init_ms = u64::from(p.waited_ms);
-            let before: usize = p.log.iter().map(|(_, b)| b.len()).sum();
-            assert!(lcd::draw_rect(&cfg, &mut p, full(&cfg), &mut c));
-            let bytes: usize = p.log.iter().map(|(_, b)| b.len()).sum::<usize>() - before;
-            let hz = if s.hz == 0 { 16_000_000u64 } else { u64::from(s.hz) };
-            let wire_ms = bytes as u64 * 8 * 1000 / hz;
-            total_ms += init_ms + ROTATIONS.len() as u64 * (u64::from(lcdprobe::HOLD_MS) + wire_ms);
+    fn probe_options_parse_and_clamp() {
+        let parse = |line: &'static str| ProbeOptions::parse(|name| cmdline::value(line.as_bytes(), name));
+        let d = parse("milk.lcd=probe");
+        assert_eq!(d, ProbeOptions::default());
+        assert_eq!((d.rounds, d.hold_ms, d.from, d.pins), (1, HOLD_MS, 1, true));
+        assert_eq!(d.count(), SETUPS.len());
+        let o = parse("milk.lcd=probe milk.lcd_probe_rounds=3 milk.lcd_probe_ms=150 milk.lcd_probe_from=5 milk.lcd_probe_pins=0");
+        assert_eq!((o.rounds, o.hold_ms, o.from, o.pins), (3, 150, 5, false));
+        assert_eq!(o.count(), SETUPS_WITHOUT_PIN_ROUND);
+        // Out of range is clamped, rubbish ignored.
+        let o = parse("milk.lcd_probe_rounds=99 milk.lcd_probe_ms=1 milk.lcd_probe_from=999");
+        assert_eq!((o.rounds, o.hold_ms, o.from), (10, 50, SETUPS.len()));
+        let o = parse("milk.lcd_probe_rounds=0 milk.lcd_probe_ms=999999 milk.lcd_probe_from=0");
+        assert_eq!((o.rounds, o.hold_ms, o.from), (1, 20_000, 1));
+        let o = parse("milk.lcd_probe_rounds=x milk.lcd_probe_ms= milk.lcd_probe_from=-4 milk.lcd_probe_pins=maybe");
+        assert_eq!((o.rounds, o.hold_ms, o.from, o.pins), (1, HOLD_MS, 1, true));
+        // `from` is clamped to the set-ups that exist without the pin round when that is off.
+        let o = parse("milk.lcd_probe_pins=0 milk.lcd_probe_from=99");
+        assert_eq!(o.from, SETUPS_WITHOUT_PIN_ROUND);
+        for v in ["off", "no", "false"] {
+            let line = std::format!("milk.lcd_probe_pins={v}");
+            assert!(!ProbeOptions::parse(|n| cmdline::value(line.as_bytes(), n)).pins);
         }
-        total_ms *= u64::from(lcdprobe::ROUNDS);
-        assert!(total_ms < 90_000, "{total_ms} ms");
-        assert!(total_ms > 30_000, "{total_ms} ms");
+        // Phase lengths follow the hold: one second, one second, 0.4 s at the default.
+        assert_eq!((lcdprobe::number_ms(1000), lcdprobe::flash_ms(1000)), (1000, 400));
+        assert_eq!((lcdprobe::number_ms(HOLD_MS), lcdprobe::flash_ms(HOLD_MS)), (1000, 400));
+        assert_eq!(lcdprobe::flash_ms(50), 20);
+    }
+
+    /// The time the probe takes on a real board, from the byte counts the model saw: the init waits,
+    /// the cards and flashes (held for their time, or as long as the wire needs for the number
+    /// card), the text card on the wire and then held. SPI clock exactly as asked.
+    fn setup_ms(i: usize, hold: u32) -> u64 {
+        let s = SETUPS[i];
+        let cfg = s.config();
+        let (w, h) = (cfg.width(), cfg.height());
+        let mut p = up(&cfg);
+        let init_ms = u64::from(p.waited_ms);
+        let wire = |bytes: usize| bytes as u64 * 8 * 1000 / u64::from(s.hz);
+        // What a full-screen draw costs on the wire, and a one-band one at least.
+        let bytes_of = |p: &SimPanel, from: usize| p.log[from..].iter().map(|(_, b)| b.len()).sum::<usize>();
+        let (_, mut nc) = number_card(i);
+        let before = p.log.len();
+        lcdprobe::draw_banded(&cfg, &mut p, &mut nc, &mut never()).unwrap();
+        let number_wire = wire(bytes_of(&p, before));
+        let (_, mut tc) = text_card(i);
+        let before = p.log.len();
+        assert!(lcd::draw_rect(&cfg, &mut p, Rect::new(0, 0, w, h), &mut tc));
+        let text_wire = wire(bytes_of(&p, before));
+        let band = wire(w * lcdprobe::BAND_ROWS * cfg.controller.bytes_per_pixel());
+        let n = u64::from(lcdprobe::number_ms(hold));
+        let f = u64::from(lcdprobe::flash_ms(hold));
+        // A phase lasts its time, or the first band's wire time if that is longer; the number card also
+        // stops at its time (banded), so it is never longer than a band beyond it.
+        let _ = number_wire;
+        init_ms + n.max(band) + 4 * f.max(band) + text_wire + u64::from(hold)
+    }
+
+    #[test]
+    fn the_whole_probe_is_bounded_and_about_a_minute_and_a_half() {
+        let total: u64 = (0..SETUPS.len()).map(|i| setup_ms(i, HOLD_MS)).sum();
+        std::eprintln!("probe cycle: {} set-ups, {} ms", SETUPS.len(), total);
+        assert!(total < 105_000, "{total} ms");
+        assert!(total > 60_000, "{total} ms");
+        for i in 0..SETUPS.len() {
+            let t = setup_ms(i, HOLD_MS);
+            assert!((3_000..6_000).contains(&t), "set-up {} takes {t} ms", i + 1);
+        }
+        // Without the pin round it is shorter by those set-ups.
+        let short: u64 = (0..SETUPS_WITHOUT_PIN_ROUND).map(|i| setup_ms(i, HOLD_MS)).sum();
+        assert!(short < total);
+        // The qemu run (50 ms holds) is a lot shorter: only the init waits and the wire remain.
+        let quick: u64 = (0..SETUPS.len()).map(|i| setup_ms(i, 50)).sum();
+        assert!(quick < 40_000, "{quick} ms");
     }
 
     #[test]
     fn a_failing_bus_gives_up_without_a_panic() {
-        let (cfg, mut c) = card(0, Rotation::Deg90);
+        let (cfg, mut c) = text_card(0);
         let mut p = SimPanel::new(cfg.controller);
         p.fail_at = Some(3);
         assert!(!lcd::init(&cfg, &mut p));
         let mut p = up(&cfg);
         p.fail_at = Some(p.log.len() + 4);
-        assert!(!lcd::draw_rect(&cfg, &mut p, full(&cfg), &mut c));
+        assert!(!lcd::draw_rect(&cfg, &mut p, Rect::new(0, 0, cfg.width(), cfg.height()), &mut c));
+        // Every set-up's init fails cleanly at every one of its transfers (a short sample of points).
+        for s in SETUPS {
+            let cfg = s.config();
+            let n = up(&cfg).log.len();
+            for k in [0, 1, n / 2, n - 1] {
+                let mut p = SimPanel::new(cfg.controller);
+                p.fail_at = Some(k);
+                assert!(!lcd::init(&cfg, &mut p));
+            }
+        }
+    }
+
+    #[test]
+    fn setups_have_distinct_streams_where_it_matters() {
+        // Two set-ups that differ only in clock, mode or pins send the same bytes (the difference is
+        // below the bus), but two controllers never do.
+        let stream = |s: &Setup| up(&s.config()).log;
+        assert_eq!(stream(&SETUPS[0]), stream(&SETUPS[10]));
+        for (i, a) in SETUPS.iter().enumerate() {
+            for b in &SETUPS[i + 1..] {
+                if a.controller != b.controller {
+                    assert_ne!(stream(a), stream(b), "{:?} {:?}", a.controller, b.controller);
+                }
+            }
+        }
     }
 }

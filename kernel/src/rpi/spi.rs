@@ -9,8 +9,9 @@
 //!
 //! A transfer keeps at most 16 bytes in flight (written but not yet read back): the TX FIFO then
 //! never overflows and the RX FIFO, which fills with the answers, never does either. Mode 0
-//! (clock idle low, data sampled on the rising edge), chip select active low, as the panels and the
-//! touch chip both want. The GPIO function select registers hold 3 bits per pin (ALT0 is 0b100);
+//! (clock idle low, data sampled on the rising edge), chip select active low, as the touch chip
+//! wants and most panels; a panel may ask for another mode (CS bit 3 is the clock polarity, bit 2
+//! the phase: mode 3 is both set). The GPIO function select registers hold 3 bits per pin (ALT0 is 0b100);
 //! the BCM2711 has its own pull up/down registers (2 bits per pin at GPIO + 0xe4).
 
 use core::ptr::{read_volatile, write_volatile};
@@ -33,6 +34,8 @@ const CS: usize = 0x00;
 const FIFO: usize = 0x04;
 const CLK: usize = 0x08;
 
+const CS_CPHA: u32 = 1 << 2;
+const CS_CPOL: u32 = 1 << 3;
 const CS_CLEAR_TX: u32 = 1 << 4;
 const CS_CLEAR_RX: u32 = 1 << 5;
 const CS_TA: u32 = 1 << 7;
@@ -103,7 +106,8 @@ fn spi_write(off: usize, v: u32) {
     unsafe { write_volatile((SPI0 + off) as *mut u32, v) }
 }
 
-/// The core clock the divider divides, in Hz (set by `lcd::init` from the firmware's answer).
+/// The core clock the divider divides, in Hz (set by `lcd::init` from the firmware's answer, or
+/// its fallback: the Pi 4's `core_freq` default, see `lcd::FALLBACK_CORE_HZ`).
 static CORE_HZ: AtomicU32 = AtomicU32::new(500_000_000);
 
 pub fn set_core_hz(hz: u32) {
@@ -143,10 +147,29 @@ pub fn reset() {
     spi_write(CS, CS_CLEAR_TX | CS_CLEAR_RX);
 }
 
-/// One full duplex transfer on chip select `cs` (0 or 1) with clock divider `cdiv`: send `tx`,
-/// store the bytes that come back in `rx` (the same length) if given. False if the controller
-/// did not finish within a generous multiple of the time the bytes need on the wire.
-pub fn transfer(cs: u8, cdiv: u32, tx: &[u8], mut rx: Option<&mut [u8]>) -> bool {
+/// The CS register bits for SPI mode `mode` (0..=3: bit 1 is the clock polarity, bit 0 the phase).
+const fn mode_bits(mode: u8) -> u32 {
+    (if mode & 2 != 0 { CS_CPOL } else { 0 }) | (if mode & 1 != 0 { CS_CPHA } else { 0 })
+}
+
+/// One full duplex transfer in SPI mode 0 on chip select `cs` (0 or 1) with clock divider `cdiv`:
+/// see [`transfer_mode`].
+pub fn transfer(cs: u8, cdiv: u32, tx: &[u8], rx: Option<&mut [u8]>) -> bool {
+    transfer_mode(cs, cdiv, 0, tx, rx)
+}
+
+/// One full duplex transfer on chip select `cs` (0 or 1) with clock divider `cdiv` in SPI mode
+/// `mode` (0..=3): send `tx`, store the bytes that come back in `rx` (the same length) if given.
+/// False if the controller did not finish within a generous multiple (six times: the core clock
+/// may be running below the rate the divider was computed from) of the time the bytes need on the
+/// wire.
+pub fn transfer_mode(
+    cs: u8,
+    cdiv: u32,
+    mode: u8,
+    tx: &[u8],
+    mut rx: Option<&mut [u8]>,
+) -> bool {
     let n = tx.len();
     if n == 0 {
         return true;
@@ -157,10 +180,11 @@ pub fn transfer(cs: u8, cdiv: u32, tx: &[u8], mut rx: Option<&mut [u8]>) -> bool
         return false;
     }
     let wire_us = n as u64 * 8 * cdiv as u64 * 1_000_000 / CORE_HZ.load(Ordering::Relaxed) as u64;
-    let deadline = Timeout::us(2000 + 3 * wire_us);
+    let deadline = Timeout::us(2000 + 6 * wire_us);
+    let cs_bits = (cs & 3) as u32 | mode_bits(mode);
     spi_write(CLK, cdiv & 0xffff);
-    spi_write(CS, (cs & 3) as u32 | CS_CLEAR_TX | CS_CLEAR_RX);
-    spi_write(CS, (cs & 3) as u32 | CS_TA);
+    spi_write(CS, cs_bits | CS_CLEAR_TX | CS_CLEAR_RX);
+    spi_write(CS, cs_bits | CS_TA);
     let (mut sent, mut got) = (0usize, 0usize);
     while sent < n && sent < 16 {
         spi_write(FIFO, tx[sent] as u32);

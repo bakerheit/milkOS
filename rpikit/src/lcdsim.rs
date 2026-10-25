@@ -17,13 +17,15 @@ use std::vec::Vec;
 
 use crate::lcd::{
     self, Bus, CASET, COLMOD, Config, Controller, DISPON, INVOFF, INVON, MADCTL, MADCTL_BGR,
-    MADCTL_MV, MADCTL_MX, MADCTL_MY, NATIVE_H, NATIVE_W, NORON, PASET, RAMWR, Rotation, SLPOUT,
-    SWRESET,
+    MADCTL_MV, MADCTL_MX, MADCTL_MY, NORON, PASET, RAMWR, Rotation, SLPOUT, SWRESET,
 };
 use crate::touch::{BURST_LEN, TouchBus};
 
 pub struct SimPanel {
     pub kind: Controller,
+    /// The controller's memory, portrait (320x480, or 240x320 for the ILI9341 and ST7789).
+    pub nw: usize,
+    pub nh: usize,
     /// Graphics memory in the controller's native orientation, `0x00RRGGBB` as the controller
     /// took the colour (before the BGR bit is applied).
     pub gram: Vec<u32>,
@@ -55,16 +57,19 @@ pub struct SimPanel {
 
 impl SimPanel {
     pub fn new(kind: Controller) -> SimPanel {
+        let (nw, nh) = kind.native();
         SimPanel {
             kind,
-            gram: std::vec![0; NATIVE_W * NATIVE_H],
+            nw,
+            nh,
+            gram: std::vec![0; nw * nh],
             display_on: false,
             sleeping: true,
             inverted: false,
             madctl: 0,
             colmod: 0x66,
-            caset: (0, NATIVE_W as u16 - 1),
-            paset: (0, NATIVE_H as u16 - 1),
+            caset: (0, nw as u16 - 1),
+            paset: (0, nh as u16 - 1),
             cmd: None,
             params: Vec::new(),
             writing: false,
@@ -93,11 +98,11 @@ impl SimPanel {
                     u16::from_be_bytes([p[2], p[3]]),
                 );
                 let limit = if self.madctl & MADCTL_MV != 0 {
-                    if cmd == CASET { NATIVE_H } else { NATIVE_W }
+                    if cmd == CASET { self.nh } else { self.nw }
                 } else if cmd == CASET {
-                    NATIVE_W
+                    self.nw
                 } else {
-                    NATIVE_H
+                    self.nh
                 };
                 if a > b || b as usize >= limit {
                     self.errors.push("window outside the memory");
@@ -121,10 +126,7 @@ impl SimPanel {
                     self.errors.push("colmod without one parameter");
                 } else {
                     self.colmod = p[0];
-                    let ok = match self.kind {
-                        Controller::Ili9488 => p[0] == 0x66,
-                        _ => p[0] == 0x55,
-                    };
+                    let ok = p[0] == self.kind.colmod();
                     if !ok {
                         self.errors
                             .push("pixel format the controller cannot take over SPI");
@@ -143,12 +145,12 @@ impl SimPanel {
             (c as usize, r as usize)
         };
         if self.madctl & MADCTL_MX != 0 {
-            x = NATIVE_W - 1 - x;
+            x = self.nw - 1 - x;
         }
         if self.madctl & MADCTL_MY != 0 {
-            y = NATIVE_H - 1 - y;
+            y = self.nh - 1 - y;
         }
-        y * NATIVE_W + x
+        y * self.nw + x
     }
 
     fn put_pixel(&mut self, colour: u32) {
@@ -225,8 +227,8 @@ impl SimPanel {
                 self.display_on = false;
                 self.madctl = 0;
                 self.inverted = false;
-                self.caset = (0, NATIVE_W as u16 - 1);
-                self.paset = (0, NATIVE_H as u16 - 1);
+                self.caset = (0, self.nw as u16 - 1);
+                self.paset = (0, self.nh as u16 - 1);
             }
             SLPOUT => self.sleeping = false,
             DISPON => {
@@ -253,15 +255,17 @@ impl SimPanel {
     /// What a viewer sees of the glass, when the display is held the way `rot` means: upright
     /// pixels, `width x height` of that rotation, `0x00RRGGBB`. Row-major.
     pub fn visible(&self, rot: Rotation) -> (usize, usize, Vec<u32>) {
+        let (nw, nh) = (self.nw, self.nh);
         // The picture as shown in the portrait setting: the kit's glass mirrors the memory.
         let portrait = |c: usize, r: usize| {
-            let mut v = self.gram[r * NATIVE_W + (NATIVE_W - 1 - c)];
+            let mut v = self.gram[r * nw + (nw - 1 - c)];
             // The glass has BGR colour filters; the BGR bit puts that right.
             if self.madctl & MADCTL_BGR == 0 {
                 v = (v & 0xff00) | ((v & 0xff) << 16) | ((v >> 16) & 0xff);
             }
-            // The usual ST7796 module is an IPS glass that shows inverted unless the inversion is on.
-            if self.inverted != (self.kind == Controller::St7796) {
+            // The usual ST7796 (and ST7789) module is an IPS glass that shows inverted unless the
+            // inversion is on.
+            if self.inverted != self.kind.usually_inverted() {
                 v = !v & 0x00ff_ffff;
             }
             v
@@ -269,41 +273,41 @@ impl SimPanel {
         match rot {
             Rotation::Deg0 => {
                 let mut out = Vec::new();
-                for r in 0..NATIVE_H {
-                    for c in 0..NATIVE_W {
+                for r in 0..nh {
+                    for c in 0..nw {
                         out.push(portrait(c, r));
                     }
                 }
-                (NATIVE_W, NATIVE_H, out)
+                (nw, nh, out)
             }
             Rotation::Deg180 => {
                 let mut out = Vec::new();
-                for r in 0..NATIVE_H {
-                    for c in 0..NATIVE_W {
-                        out.push(portrait(NATIVE_W - 1 - c, NATIVE_H - 1 - r));
+                for r in 0..nh {
+                    for c in 0..nw {
+                        out.push(portrait(nw - 1 - c, nh - 1 - r));
                     }
                 }
-                (NATIVE_W, NATIVE_H, out)
+                (nw, nh, out)
             }
             Rotation::Deg90 => {
-                // Landscape (c', r'): portrait column 319 - r', row c'.
+                // Landscape (c', r'): portrait column nw - 1 - r', row c'.
                 let mut out = Vec::new();
-                for r in 0..NATIVE_W {
-                    for c in 0..NATIVE_H {
-                        out.push(portrait(NATIVE_W - 1 - r, c));
+                for r in 0..nw {
+                    for c in 0..nh {
+                        out.push(portrait(nw - 1 - r, c));
                     }
                 }
-                (NATIVE_H, NATIVE_W, out)
+                (nh, nw, out)
             }
             Rotation::Deg270 => {
-                // Landscape (c', r'): portrait column r', row 479 - c'.
+                // Landscape (c', r'): portrait column r', row nh - 1 - c'.
                 let mut out = Vec::new();
-                for r in 0..NATIVE_W {
-                    for c in 0..NATIVE_H {
-                        out.push(portrait(r, NATIVE_H - 1 - c));
+                for r in 0..nw {
+                    for c in 0..nh {
+                        out.push(portrait(r, nh - 1 - c));
                     }
                 }
-                (NATIVE_H, NATIVE_W, out)
+                (nh, nw, out)
             }
         }
     }

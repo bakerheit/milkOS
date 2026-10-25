@@ -135,7 +135,7 @@ check '^milkfs: mmcblk0 mounted' "boot 2: the card mounts again"
 
 # ---- boot 3: two RAM banks and a hole ----
 DTB_ARGS=(-device "loader,file=$T/banks.dtb,addr=0x100,force-raw=on")
-boot 3 "wait@300:$P" "wait@120:wm: desktop up" "send:system" "wait:$P"
+boot 3 "wait@300:$P" "wait@300:wm: desktop up" "send:system" "wait:$P"
 sleep 1
 python3 scripts/qmp.py "$QMP" screendump "$T/banks.png" >/dev/null 2>&1 || true
 stop

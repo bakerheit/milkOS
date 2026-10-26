@@ -10,6 +10,10 @@
 //! IRQ numbers here are GIC interrupt IDs (INTIDs): SGI 0-15, PPI 16-31, SPI 32+. Use
 //! [`spi`] / [`ppi`] to convert from the "SPI n" / "PPI n" numbers in device trees. Handlers
 //! are attached by INTID with [`register`]; the IRQ vector calls [`handle_irq`].
+//!
+//! The Pixel 2 build (feature `msm8998`) has a GICv3: everything that touches a register goes to
+//! `gic3.rs` there (distributor, redistributors, the CPU interface's system registers), while the handler
+//! table, the counters and the numbering stay here.
 
 // Public API surface for later subsystems (scheduler, drivers); not all of it is used yet.
 #![allow(dead_code)]
@@ -128,6 +132,31 @@ fn check(irq: u32) -> Result<(), Error> {
 /// Bring up the distributor and this core's CPU interface. All interrupts end up disabled,
 /// at [`DEFAULT_PRIORITY`], targeted at the calling CPU, until a driver enables them.
 pub fn init() {
+    #[cfg(feature = "msm8998")]
+    let _ = init_v3();
+    #[cfg(not(feature = "msm8998"))]
+    init_v2();
+}
+
+/// The Pixel 2: the GICv3 (kernel/src/gic3.rs). `Err` names the register that disagreed; the caller shows it
+/// and carries on without interrupts.
+#[cfg(feature = "msm8998")]
+pub fn init_v3() -> Result<(), &'static str> {
+    match crate::gic3::init() {
+        Ok(lines) => {
+            NUM_IRQS.store(lines.min(MAX_IRQS as u32), Ordering::Relaxed);
+            CPU_IF_MASK[0].store(1, Ordering::Relaxed);
+            Ok(())
+        }
+        Err(why) => {
+            kprintln!("[gic] GICv3 setup failed: {why}");
+            Err(why)
+        }
+    }
+}
+
+#[cfg(not(feature = "msm8998"))]
+fn init_v2() {
     let arch = (gicd_read(GICD_PIDR2) >> 4) & 0xf;
     if arch != 2 {
         panic!(
@@ -178,6 +207,24 @@ pub fn init() {
 /// priorities) and its CPU interface. SGIs and PPIs that have a handler are enabled here
 /// too, since `enable` on the boot CPU only reached the boot CPU's banked copy.
 pub fn init_cpu() {
+    #[cfg(feature = "msm8998")]
+    {
+        CPU_IF_MASK[percpu::id()].store(1 << percpu::id(), Ordering::Relaxed);
+        crate::gic3::init_cpu();
+        // This CPU's SGIs and PPIs that have a handler (enable on the boot CPU reached only its own copy).
+        for (irq, h) in HANDLERS.iter().take(32).enumerate() {
+            if h.get::<Handler>().is_some() {
+                crate::gic3::enable(irq as u32);
+            }
+        }
+        return;
+    }
+    #[cfg(not(feature = "msm8998"))]
+    init_cpu_v2();
+}
+
+#[cfg(not(feature = "msm8998"))]
+fn init_cpu_v2() {
     let m = (gicd_read(GICD_ITARGETSR) & 0xff) as u8;
     CPU_IF_MASK[percpu::id()].store(
         if m == 0 { 1 << percpu::id() } else { m },
@@ -255,7 +302,11 @@ pub fn target_cpus(irq: u32) -> u32 {
     if irq < 32 {
         return percpu::online().fold(0, |m, c| m | 1 << c);
     }
+    #[cfg(feature = "msm8998")]
+    return crate::gic3::routed_to(irq);
+    #[cfg(not(feature = "msm8998"))]
     let t = gicd_read8(GICD_ITARGETSR + irq as usize);
+    #[cfg(not(feature = "msm8998"))]
     percpu::online()
         .filter(|&c| t & CPU_IF_MASK[c].load(Ordering::Relaxed) != 0)
         .fold(0, |m, c| m | 1 << c)
@@ -272,6 +323,9 @@ pub fn unregister(irq: u32) -> Result<(), Error> {
 /// Unmask `irq` at the distributor.
 pub fn enable(irq: u32) -> Result<(), Error> {
     check(irq)?;
+    #[cfg(feature = "msm8998")]
+    crate::gic3::enable(irq);
+    #[cfg(not(feature = "msm8998"))]
     gicd_write(GICD_ISENABLER + (irq as usize / 32) * 4, 1 << (irq % 32));
     Ok(())
 }
@@ -279,6 +333,9 @@ pub fn enable(irq: u32) -> Result<(), Error> {
 /// Mask `irq` at the distributor.
 pub fn disable(irq: u32) -> Result<(), Error> {
     check(irq)?;
+    #[cfg(feature = "msm8998")]
+    crate::gic3::disable(irq);
+    #[cfg(not(feature = "msm8998"))]
     gicd_write(GICD_ICENABLER + (irq as usize / 32) * 4, 1 << (irq % 32));
     Ok(())
 }
@@ -286,12 +343,18 @@ pub fn disable(irq: u32) -> Result<(), Error> {
 /// Set the priority of `irq` (0 = most urgent). Only the top bits are implemented.
 pub fn set_priority(irq: u32, prio: u8) -> Result<(), Error> {
     check(irq)?;
+    #[cfg(feature = "msm8998")]
+    crate::gic3::set_priority(irq, prio);
+    #[cfg(not(feature = "msm8998"))]
     gicd_write8(GICD_IPRIORITYR + irq as usize, prio);
     Ok(())
 }
 
 pub fn priority(irq: u32) -> Result<u8, Error> {
     check(irq)?;
+    #[cfg(feature = "msm8998")]
+    return Ok(crate::gic3::priority(irq));
+    #[cfg(not(feature = "msm8998"))]
     Ok(gicd_read8(GICD_IPRIORITYR + irq as usize))
 }
 
@@ -300,6 +363,12 @@ pub fn priority(irq: u32) -> Result<u8, Error> {
 pub fn set_target(irq: u32, cpu_mask: u8) -> Result<(), Error> {
     check(irq)?;
     if irq >= 32 {
+        #[cfg(feature = "msm8998")]
+        if cpu_mask != 0 {
+            // GICv3: the mask is a set of our CPU numbers; the router takes the lowest.
+            crate::gic3::route(irq, cpu_mask.trailing_zeros() as usize);
+        }
+        #[cfg(not(feature = "msm8998"))]
         gicd_write8(GICD_ITARGETSR + irq as usize, cpu_mask);
     }
     Ok(())
@@ -311,33 +380,50 @@ pub fn set_edge_triggered(irq: u32, edge: bool) -> Result<(), Error> {
     if irq < 16 {
         return Ok(());
     }
-    let off = GICD_ICFGR + (irq as usize / 16) * 4;
-    let shift = (irq % 16) * 2 + 1;
-    let mut v = gicd_read(off);
-    if edge {
-        v |= 1 << shift;
-    } else {
-        v &= !(1 << shift);
+    #[cfg(feature = "msm8998")]
+    {
+        crate::gic3::set_edge_triggered(irq, edge);
+        return Ok(());
     }
-    gicd_write(off, v);
-    Ok(())
+    #[cfg(not(feature = "msm8998"))]
+    {
+        let off = GICD_ICFGR + (irq as usize / 16) * 4;
+        let shift = (irq % 16) * 2 + 1;
+        let mut v = gicd_read(off);
+        if edge {
+            v |= 1 << shift;
+        } else {
+            v &= !(1 << shift);
+        }
+        gicd_write(off, v);
+        Ok(())
+    }
 }
 
 /// Force `irq` pending (software-raise a PPI/SPI; handy for tests).
 pub fn set_pending(irq: u32) -> Result<(), Error> {
     check(irq)?;
+    #[cfg(feature = "msm8998")]
+    crate::gic3::set_pending(irq);
+    #[cfg(not(feature = "msm8998"))]
     gicd_write(GICD_ISPENDR + (irq as usize / 32) * 4, 1 << (irq % 32));
     Ok(())
 }
 
 pub fn clear_pending(irq: u32) -> Result<(), Error> {
     check(irq)?;
+    #[cfg(feature = "msm8998")]
+    crate::gic3::clear_pending(irq);
+    #[cfg(not(feature = "msm8998"))]
     gicd_write(GICD_ICPENDR + (irq as usize / 32) * 4, 1 << (irq % 32));
     Ok(())
 }
 
 /// Send software-generated interrupt `sgi` (0..15) to the CPUs in `cpu_mask`. For SMP later.
 pub fn send_sgi(sgi: u32, cpu_mask: u8) {
+    #[cfg(feature = "msm8998")]
+    crate::gic3::send_sgi(sgi & 0xf, cpu_mask);
+    #[cfg(not(feature = "msm8998"))]
     gicd_write(GICD_SGIR, ((cpu_mask as u32) << 16) | (sgi & 0xf));
 }
 
@@ -368,8 +454,16 @@ pub fn is_registered(irq: u32) -> bool {
 
 /// Called from the IRQ vector: acknowledge, run the registered handler, end the interrupt.
 pub fn handle_irq(frame: &mut TrapFrame) {
-    let iar = gicc_read(GICC_IAR);
-    let irq = iar & 0x3ff;
+    #[cfg(feature = "msm8998")]
+    let (iar, irq) = {
+        let iar = crate::gic3::ack();
+        (iar, iar & 0xff_ffff)
+    };
+    #[cfg(not(feature = "msm8998"))]
+    let (iar, irq) = {
+        let iar = gicc_read(GICC_IAR);
+        (iar, iar & 0x3ff)
+    };
     if irq >= 1020 {
         SPURIOUS.fetch_add(1, Ordering::Relaxed);
         return; // spurious: no EOI
@@ -386,5 +480,8 @@ pub fn handle_irq(frame: &mut TrapFrame) {
         }
     }
     // Writing the full IAR value (including the SGI source CPU bits) is required.
+    #[cfg(feature = "msm8998")]
+    crate::gic3::eoi(iar);
+    #[cfg(not(feature = "msm8998"))]
     gicc_write(GICC_EOIR, iar);
 }

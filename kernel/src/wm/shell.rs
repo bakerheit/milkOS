@@ -2015,9 +2015,19 @@ fn paint_moon(p: &mut Painter, x: i32, y: i32) {
     p.circle(x + 6, y - 1, 12, MILK, 255);
 }
 
-/// The menu bar clock's text ("Wed 12:08").
+/// The menu bar clock's text ("Wed 12:08"). The Pixel 2 has no input yet, and its clock is the only sign that the
+/// machine has not frozen, so it shows seconds too ("Wed 12:08:31").
 pub(super) fn status_clock() -> String {
     let t = rtc::now();
+    if crate::platform::MSM {
+        return format!(
+            "{} {:02}:{:02}:{:02}",
+            &rtc::DAYS[t.weekday as usize][..3],
+            t.hour,
+            t.minute,
+            t.second
+        );
+    }
     format!(
         "{} {:02}:{:02}",
         &rtc::DAYS[t.weekday as usize][..3],

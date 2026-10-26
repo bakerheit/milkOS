@@ -5,6 +5,10 @@
   pixel2_check.py console FILE1.ppm FILE2.ppm  the boot log console and the live counter (two dumps a while apart)
   pixel2_check.py text FILE.ppm ROW0 ROW1 N    at least N light pixels in rows ROW0..ROW1
   pixel2_check.py red FILE.ppm ROW0 ROW1 N     at least N red-text pixels in rows ROW0..ROW1
+  pixel2_check.py desktop FILE1.ppm FILE2.ppm [free]  the desktop on the 1080x1920 glass, a 540x960 picture shown doubled ("free": any size): it is
+                                               bright (not the dark boot log), the menu bar is there, every 2x2 block is one
+                                               colour, and the clock in the menu bar changed between the two dumps
+  pixel2_check.py turned FILE.ppm              the desktop turned a quarter turn clockwise: the menu bar is along the right edge
 
 qemu's ramfb reads the buffer as B, G, R, x; a guest that writes another 4-byte order shows red and
 blue (or more) changed, which is exactly what the pattern checks expect for FMT. Prints `ok:` / `FAIL:` lines
@@ -117,6 +121,40 @@ def console(p1, p2):
     say(bool(ma) and bool(mb) and ma[0] != mb[0], f"the marker moved: {ma[:1]} -> {mb[:1]}")
 
 
+def desktop(p1, p2, doubled=True):
+    a, b = load(p1), load(p2)
+    say((a[0], a[1]) == (1080, 1920), "size 1080x1920")
+    say(px(a, 500, 1200) != (0x16, 0x15, 0x13), f"not the boot log's dark background: {px(a, 500, 1200)}")
+    n = count(a, 0, 200, 1080, 1700, light)
+    say(n > 400000, f"{n} light pixels in the desktop area (the wallpaper and a window), want 400000+")
+    bar = count(a, 0, 0, 1080, 50, light)
+    say(bar > 40000, f"{bar} light pixels in the menu bar rows (want 40000+ of 54000)")
+    dock = count(a, 0, 1830, 1080, 1900, lambda p: p[0] < 120 or p[1] < 120)
+    say(dock > 3000, f"{dock} dark or coloured pixels in the dock rows (the icons): want 3000+")
+    # The desktop is 540x960 and the glass shows every pixel as a 2x2 block (the exact 2x of the area filter).
+    bad_blocks = 0
+    total = 0
+    for k in range(1, 1200):
+        x, y = (k * 37) % 540, (k * 61) % 960
+        o = [px(a, 2 * x + dx, 2 * y + dy) for dy in (0, 1) for dx in (0, 1)]
+        total += 1
+        bad_blocks += len(set(o)) != 1
+    if doubled:
+        say(bad_blocks == 0, f"{total} sampled 2x2 blocks, {bad_blocks} not one colour")
+    changed = sum(1 for y in range(8, 52) for x in range(880, 1080) if px(a, x, y) != px(b, x, y))
+    say(changed > 20, f"the clock changed between the dumps: {changed} pixels differ")
+
+
+def turned(path):
+    img = load(path)
+    say((img[0], img[1]) == (1080, 1920), "size 1080x1920")
+    right = count(img, 1020, 100, 1070, 1800, light)
+    left = count(img, 5, 100, 55, 1800, light)
+    top = count(img, 100, 0, 1000, 40, light)
+    say(right > 0.5 * 50 * 1700, f"the right edge is the menu bar: {right} light pixels in a strip of 85000")
+    say(left < right and top < right, f"the left edge ({left}) and the top ({top}) are not the menu bar")
+
+
 def text(path, r0, r1, n):
     img = load(path)
     c = count(img, 0, r0, 1080, r1, light)
@@ -135,6 +173,10 @@ if __name__ == "__main__":
         pattern(args[0], args[1] if len(args) > 1 else "bgrx")
     elif cmd == "console":
         console(args[0], args[1])
+    elif cmd == "desktop":
+        desktop(args[0], args[1], len(args) < 3 or args[2] != "free")
+    elif cmd == "turned":
+        turned(args[0])
     elif cmd == "text":
         text(args[0], int(args[1]), int(args[2]), int(args[3]))
     elif cmd == "red":

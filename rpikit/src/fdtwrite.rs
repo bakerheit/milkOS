@@ -363,6 +363,10 @@ mod tests {
         w.prop_str("compatible", "arm,gic-v3").unwrap();
         w.prop_cells("reg", &[0x17a0_0000, 0x1_0000, 0x17b0_0000, 0x10_0000]).unwrap();
         w.end_node().unwrap();
+        w.begin_node("timer").unwrap();
+        w.prop_str("compatible", "arm,armv8-timer").unwrap();
+        w.prop_cells("interrupts", &[1, 1, 0xf08, 1, 2, 0xf08, 1, 3, 0xf08, 1, 0, 0xf08]).unwrap();
+        w.end_node().unwrap();
         w.begin_node("qcom,mdss_mdp@c900000").unwrap();
         w.prop_cells("reg", &[0xc90_0000, 0x9_0000, 0xc9b_0000, 0x1040]).unwrap();
         w.end_node().unwrap();
@@ -397,6 +401,11 @@ mod tests {
         assert_eq!(reg[1], (0x17b0_0000, 0x10_0000));
         assert_eq!(d.node_reg_compat(b"arm,gic", &mut reg), 0, "whole strings only");
         assert_eq!(d.node_reg_compat(b"no,such", &mut reg), 0);
+        // A property of the node found by compatible: the timer's four interrupts, as the GIC driver reads them.
+        let t = crate::msm::timer_intids(d.prop_compat(b"arm,armv8-timer", b"interrupts").unwrap());
+        assert_eq!((t.phys, t.virt), (Some(18), Some(19)));
+        assert_eq!(d.prop_compat(b"arm,armv8-timer", b"reg"), None);
+        assert_eq!(d.prop_compat(b"arm,armv7-timer", b"interrupts"), None);
         assert_eq!(d.node_reg(b"qcom,mdss_mdp@", &mut reg), 2);
         assert_eq!(reg[0], (0xc90_0000, 0x9_0000));
         // The root's memory node: two banks, one above 4 GiB.

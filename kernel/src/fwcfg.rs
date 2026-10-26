@@ -41,6 +41,8 @@ const DMA_WRITE: u32 = 1 << 4;
 pub struct File {
     pub select: u16,
     pub size: u32,
+    /// An option of the kernel command line (`select` is then its offset in the command line), not a fw_cfg file.
+    pub cmdline: bool,
 }
 
 /// The DMA access descriptor. All fields big endian. Must live in guest RAM.
@@ -84,9 +86,9 @@ fn bootargs() -> &'static [u8] {
     }
 }
 
-/// The value of the boot option `milk.<name>` on the Pi's command line (None elsewhere, and when
+/// The value of the boot option `milk.<name>` on the Pi's (or the Pixel 2's) command line (None elsewhere, and when
 /// the option is absent). The bytes live in the firmware's device tree, which is never freed.
-#[cfg(feature = "raspi")]
+#[cfg(any(feature = "raspi", feature = "msm8998"))]
 pub fn option(name: &str) -> Option<&'static [u8]> {
     rpikit::cmdline::value(bootargs(), name)
 }
@@ -94,7 +96,8 @@ pub fn option(name: &str) -> Option<&'static [u8]> {
 /// True if a fw_cfg device is present and supports DMA (the Pi: always, the command line stands
 /// in for it).
 pub fn available() -> bool {
-    if crate::platform::RASPI {
+    // The phone has no fw_cfg, and the address the device would be at is one of the SoC's registers.
+    if crate::platform::RASPI || crate::platform::PHONE {
         return true;
     }
     select(SEL_SIGNATURE);
@@ -117,12 +120,22 @@ pub fn available() -> bool {
 
 /// Look up a file in the fw_cfg directory by name (e.g. `"etc/ramfb"`).
 pub fn find_file(name: &str) -> Option<File> {
-    if crate::platform::RASPI {
-        let (off, len) = rpikit::cmdline::find(bootargs(), rpikit::cmdline::option_name(name)?)?;
-        return Some(File {
-            select: u16::try_from(off).ok()?,
-            size: len as u32,
-        });
+    if crate::platform::CMDLINE_OPTIONS {
+        if let Some(opt) = rpikit::cmdline::option_name(name)
+            && let Some((off, len)) = rpikit::cmdline::find(bootargs(), opt)
+            && let Ok(select) = u16::try_from(off)
+        {
+            return Some(File {
+                select,
+                size: len as u32,
+                cmdline: true,
+            });
+        }
+        // The Pi and the phone have no fw_cfg; qemu's test build of the phone's code does (ramfb, and the
+        // test's own files).
+        if crate::platform::RASPI || crate::platform::PHONE {
+            return None;
+        }
     }
     crate::platform::CURRENT.fwcfg?;
     select(SEL_FILE_DIR);
@@ -140,6 +153,7 @@ pub fn find_file(name: &str) -> Option<File> {
             return Some(File {
                 select: u16::from_be_bytes(sel),
                 size,
+                cmdline: false,
             });
         }
     }
@@ -176,7 +190,7 @@ fn dma(control: u32, buf: *mut u8, len: usize) -> bool {
 
 /// Write `data` to the fw_cfg file `file` through the DMA interface.
 pub fn write_file(file: File, data: &mut [u8]) -> bool {
-    if crate::platform::RASPI {
+    if crate::platform::RASPI || crate::platform::PHONE || file.cmdline {
         return false;
     }
     dma(
@@ -189,7 +203,7 @@ pub fn write_file(file: File, data: &mut [u8]) -> bool {
 /// Read up to `buf.len()` bytes of `file` through the DMA interface.
 #[allow(dead_code)]
 pub fn read_file(file: File, buf: &mut [u8]) -> bool {
-    if crate::platform::RASPI {
+    if file.cmdline {
         let args = bootargs();
         let (off, len) = (file.select as usize, file.size as usize);
         if off.checked_add(len).is_none_or(|e| e > args.len()) {

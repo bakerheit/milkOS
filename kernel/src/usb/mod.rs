@@ -28,6 +28,12 @@ pub fn start() {
     if crate::rpi::disabled("usb") {
         return;
     }
+    // The phone's USB is a DWC3 behind the SoC's own glue, not an xHCI on a PCIe host bridge: nothing here
+    // applies, and nothing may probe addresses the SoC owns.
+    if crate::platform::PHONE {
+        kprintln!("[usb] none yet on the Pixel 2");
+        return;
+    }
     crate::sched::spawn("usb", run);
 }
 

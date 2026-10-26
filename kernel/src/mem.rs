@@ -89,6 +89,14 @@ pub fn init() {
         .find(|b| (b.base..b.base + b.size).contains(&kstart))
         .copied()
         .unwrap_or(MemRange { base: 0, size: 0 });
+    // The image must fit the bank it is in (a reserved region of the device tree right behind it would otherwise show
+    // up as a page table error much later).
+    assert!(
+        primary.size == 0 || kend <= primary.base + primary.size,
+        "mem: the kernel image {kstart:#x}..{kend:#x} does not fit the RAM bank {:#x}..{:#x} it was loaded in (a reserved region follows it?)",
+        primary.base,
+        primary.base + primary.size
+    );
     // The allocator covers the first bank and everything above it as one range; the gaps
     // between banks (the Pi has one for the GPU's memory) are reserved below.
     let span_end = banks[..nbanks]

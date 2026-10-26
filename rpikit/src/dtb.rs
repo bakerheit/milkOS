@@ -193,6 +193,31 @@ impl Dtb {
         found
     }
 
+    /// The property `prop` of the first node whose `compatible` lists `compat` (as a whole string), at any depth below
+    /// the root. For nodes whose name differs between trees (the `arm,armv8-timer` node is `timer` in both of the
+    /// ones this kernel meets, but the interrupt controller is not).
+    pub fn prop_compat(&self, compat: &[u8], prop: &[u8]) -> Option<&'static [u8]> {
+        let mut which = None;
+        self.for_each_prop_id(|_p, _n, id, depth, name, data| {
+            if which.is_none()
+                && depth >= 2
+                && name == b"compatible"
+                && data.split(|&b| b == 0).any(|s| s == compat)
+            {
+                which = Some(id);
+            }
+        });
+        let want = which?;
+        let mut found: Option<&'static [u8]> = None;
+        self.for_each_prop_id(|_p, _n, id, _d, name, data| {
+            if found.is_none() && id == want && name == prop {
+                // SAFETY: as in `find`.
+                found = Some(unsafe { core::slice::from_raw_parts(data.as_ptr(), data.len()) });
+            }
+        });
+        found
+    }
+
     /// Like [`Dtb::find`], for the first node whose name starts with `prefix` (`pcie@` matches
     /// `pcie@10000000`).
     pub fn find_prefix(&self, prefix: &[u8], prop: &[u8]) -> Option<&'static [u8]> {

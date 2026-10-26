@@ -34,6 +34,10 @@ const RPIFB: u8 = 3;
 /// the panel shows it, scaled down (rpi/lcd.rs).
 #[cfg(feature = "raspi")]
 const LCDFB: u8 = 4;
+/// The Pixel 2's glass: the desktop draws in RAM and msm/present.rs sends it, turned and stretched, to the
+/// bootloader's framebuffer.
+#[cfg(feature = "msm8998")]
+const MSMFB: u8 = 5;
 static BACKEND: AtomicU8 = AtomicU8::new(NONE);
 
 fn backend() -> u8 {
@@ -45,6 +49,21 @@ static FRAMEBUFFER: SpinLock<Option<Surface<'static>>> = SpinLock::new(None);
 
 /// Initialise the display. Does nothing (and logs to the UART only) without a display device.
 pub fn init() {
+    // The Pixel 2: the boot console (msm/stage1.rs) is already on the glass; this adds the desktop's surface.
+    #[cfg(feature = "msm8998")]
+    {
+        let opts = crate::msm::opts();
+        match crate::msm::present::setup(&opts) {
+            Some(fb) => {
+                BACKEND.store(MSMFB, Ordering::Release);
+                *FRAMEBUFFER.lock() = Some(fb);
+                let (w, h) = size();
+                kprintln!("display: Pixel 2 glass, the desktop draws {w}x{h} in RAM and the boot log stays up until it starts");
+            }
+            None => kprintln!("display: no desktop surface"),
+        }
+        return;
+    }
     #[cfg(feature = "raspi")]
     {
         use crate::rpi::{fb, lcd, present};
@@ -205,6 +224,10 @@ pub fn take_framebuffer() -> Option<Surface<'static>> {
         sink::remove_screen();
     }
     let fb = FRAMEBUFFER.lock().take();
+    #[cfg(feature = "msm8998")]
+    if fb.is_some() && backend() == MSMFB {
+        crate::msm::present::start();
+    }
     // The SPI panel, if there is one, shows the desktop too from here on.
     #[cfg(feature = "raspi")]
     if fb.is_some() {
@@ -235,6 +258,8 @@ pub fn size() -> (usize, usize) {
         RPIFB => crate::rpi::present::logical_size().unwrap_or_else(crate::rpi::fb::size),
         #[cfg(feature = "raspi")]
         LCDFB => crate::rpi::lcd::primary_size(),
+        #[cfg(feature = "msm8998")]
+        MSMFB => crate::msm::present::logical_size().unwrap_or((WIDTH, HEIGHT)),
         _ => ramfb::size(),
     }
 }
@@ -249,6 +274,8 @@ pub fn framebuffer() -> Option<*mut u32> {
         RPIFB => crate::rpi::present::logical_framebuffer().or_else(crate::rpi::fb::framebuffer),
         #[cfg(feature = "raspi")]
         LCDFB => crate::rpi::lcd::primary_framebuffer(),
+        #[cfg(feature = "msm8998")]
+        MSMFB => crate::msm::present::logical_framebuffer(),
         _ => None,
     }
 }
@@ -258,6 +285,11 @@ pub fn framebuffer() -> Option<*mut u32> {
 /// Thread context only.
 pub fn set_mode(w: usize, h: usize) -> Option<Surface<'static>> {
     match backend() {
+        #[cfg(feature = "msm8998")]
+        MSMFB => {
+            kprintln!("display: {w}x{h} refused: the desktop's size on the phone is msm.desk= at boot");
+            None
+        }
         GPU => gpu::set_mode(w, h),
         RAMFB => ramfb::set_mode(w, h),
         #[cfg(feature = "raspi")]
@@ -292,6 +324,11 @@ pub fn present(rects: &[Rect]) {
     // The SPI panel shows what the desktop drew, in its own time.
     #[cfg(feature = "raspi")]
     crate::rpi::lcd::note_source(rects);
+    // The Pixel 2: converted and packed into the bootloader's framebuffer.
+    #[cfg(feature = "msm8998")]
+    if backend() == MSMFB {
+        crate::msm::present::present(rects);
+    }
 }
 
 /// Show the whole framebuffer and wait until it is on screen, so the caller may draw again
@@ -301,6 +338,10 @@ pub fn sync() {
         let (w, h) = size();
         gpu::present(&[Rect::new(0, 0, w as i32, h as i32)]);
         gpu::wait();
+    }
+    #[cfg(feature = "msm8998")]
+    if backend() == MSMFB {
+        crate::msm::present::present_all();
     }
     #[cfg(feature = "raspi")]
     {
@@ -320,6 +361,10 @@ pub fn sync_rows(lo: usize, hi: usize) {
     if backend() == GPU {
         gpu::present(&[r]);
         gpu::wait();
+    }
+    #[cfg(feature = "msm8998")]
+    if backend() == MSMFB {
+        crate::msm::present::present(&[r]);
     }
     #[cfg(feature = "raspi")]
     {

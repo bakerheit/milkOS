@@ -47,6 +47,16 @@ pub enum CrashTest {
     Pre,
 }
 
+/// Which of the CPU's timers drives the scheduler tick (`msm.timer=`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TimerSel {
+    /// Try the virtual timer, then the non-secure physical one, and keep the first whose interrupt the GIC
+    /// really raises.
+    Auto,
+    Virt,
+    Phys,
+}
+
 /// The `msm.<name>=` options of the kernel command line (docs/pixel2.md). Anything wrong is
 /// reported in `warnings` and the default is used.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -72,6 +82,19 @@ pub struct Opts {
     /// nobody looks after it. Off unless asked.
     pub wdt_pet: bool,
     pub crashtest: Option<CrashTest>,
+    /// `msm.stage=1`: stop after the stage 1 log and keep counting (no interrupts, no desktop). 2 (the default) goes on to
+    /// the whole kernel and the desktop.
+    pub stage: u8,
+    /// Seconds the boot log stays on the screen before the desktop takes it over (`msm.logsecs=`).
+    pub logsecs: u32,
+    /// The desktop's size in its own pixels (`msm.desk=WxH`), shown stretched over the glass; default: see [`desktop_size`].
+    pub desk: Option<(usize, usize)>,
+    /// Turn the desktop clockwise by this many degrees on the glass (`msm.rotate=`).
+    pub rotate: crate::lcd::Rotation,
+    /// Which timer ticks (`msm.timer=auto|virt|phys`).
+    pub timer: TimerSel,
+    /// Start the other seven CPUs through PSCI (`msm.smp=1`). Off: one CPU.
+    pub smp: bool,
 }
 
 pub const MAX_WARNINGS: usize = 8;
@@ -91,6 +114,12 @@ impl Default for Opts {
             mdp_dump: false,
             wdt_pet: false,
             crashtest: None,
+            stage: 2,
+            logsecs: 5,
+            desk: None,
+            rotate: crate::lcd::Rotation::Deg0,
+            timer: TimerSel::Auto,
+            smp: false,
         }
     }
 }
@@ -192,6 +221,52 @@ impl Opts {
                 b"early" => o.crashtest = Some(CrashTest::Early),
                 b"pre" => o.crashtest = Some(CrashTest::Pre),
                 _ => warn("msm.crashtest: want panic, abort, early or pre"),
+            }
+        }
+        if let Some(v) = option(cmdline, "stage") {
+            match v {
+                b"1" => o.stage = 1,
+                b"2" => o.stage = 2,
+                _ => warn("msm.stage: want 1 or 2"),
+            }
+        }
+        if let Some(v) = option(cmdline, "logsecs") {
+            match parse_num(v) {
+                Some(s) if s <= 3600 => o.logsecs = s as u32,
+                _ => warn("msm.logsecs: want seconds (0 to 3600)"),
+            }
+        }
+        if let Some(v) = option(cmdline, "desk") {
+            let parsed = v
+                .iter()
+                .position(|&c| c == b'x')
+                .and_then(|x| Some((parse_num(&v[..x])?, parse_num(&v[x + 1..])?)));
+            match parsed {
+                Some((w_, h)) if (320..=4096).contains(&w_) && (320..=4096).contains(&h) => {
+                    o.desk = Some((w_ as usize, h as usize))
+                }
+                _ => warn("msm.desk: want WIDTHxHEIGHT, 320 to 4096"),
+            }
+        }
+        if let Some(v) = option(cmdline, "rotate") {
+            match crate::lcd::Rotation::parse(v) {
+                Some(r) => o.rotate = r,
+                None => warn("msm.rotate: want 0, 90, 180 or 270"),
+            }
+        }
+        if let Some(v) = option(cmdline, "timer") {
+            match v {
+                b"auto" => o.timer = TimerSel::Auto,
+                b"virt" => o.timer = TimerSel::Virt,
+                b"phys" => o.timer = TimerSel::Phys,
+                _ => warn("msm.timer: want auto, virt or phys"),
+            }
+        }
+        if let Some(v) = option(cmdline, "smp") {
+            match v {
+                b"1" | b"on" => o.smp = true,
+                b"0" | b"off" => {}
+                _ => warn("msm.smp: want 1 or 0"),
             }
         }
         (o, w, n)
@@ -557,6 +632,82 @@ pub fn redistributors(size: usize, mut typer: impl FnMut(usize) -> u64, out: &mu
 /// MPIDR_EL1 affinity (Aff3 in bits 39:32, Aff2..0 in 23:0) as the GICR_TYPER affinity word.
 pub fn mpidr_affinity(mpidr: u64) -> u32 {
     (((mpidr >> 32) & 0xff) << 24) as u32 | (mpidr & 0xff_ffff) as u32
+}
+
+// ---- GICv3 bring-up and the timer interrupt ------------------------------------------------
+
+/// The priority every interrupt gets (Linux's `GICD_INT_DEF_PRI`), and the priority mask that lets it through
+/// (Linux's `DEFAULT_PMR_VALUE`): what a non-secure kernel under a secure monitor uses, where the priority a
+/// non-secure writer sees is shifted into the lower half of the range.
+pub const GIC_DEFAULT_PRIORITY: u8 = 0xa0;
+pub const GIC_PMR: u64 = 0xf0;
+
+/// The INTID that an interrupt specifier of the tree names: `(0, n)` is SPI n (INTID 32 + n), `(1, n)` is PPI n
+/// (INTID 16 + n). Anything else (extended ranges, LPIs) is `None`.
+pub fn intid(kind: u32, num: u32) -> Option<u32> {
+    match kind {
+        0 if num < 988 => Some(32 + num),
+        1 if num < 16 => Some(16 + num),
+        _ => None,
+    }
+}
+
+/// The four INTIDs of an `arm,armv8-timer` node's `interrupts` (three cells each: type, number, flags): the secure
+/// physical timer, the non-secure physical one, the virtual one and the hypervisor's.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct TimerIntids {
+    pub secure: Option<u32>,
+    pub phys: Option<u32>,
+    pub virt: Option<u32>,
+    pub hyp: Option<u32>,
+}
+
+pub fn timer_intids(prop: &[u8]) -> TimerIntids {
+    let cell = |at: usize| -> Option<u32> {
+        let b = prop.get(at..at + 4)?;
+        Some(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    };
+    let entry = |i: usize| -> Option<u32> { intid(cell(i * 12)?, cell(i * 12 + 4)?) };
+    TimerIntids {
+        secure: entry(0),
+        phys: entry(1),
+        virt: entry(2),
+        hyp: entry(3),
+    }
+}
+
+/// The value of a `GICD_IROUTER` register that sends an SPI to the CPU with this `MPIDR_EL1` (affinity routing:
+/// Aff3 in bits 39:32, Aff2 23:16, Aff1 15:8, Aff0 7:0).
+pub fn irouter(mpidr: u64) -> u64 {
+    ((mpidr >> 32) & 0xff) << 32 | (mpidr & 0xff_ffff)
+}
+
+/// The value written to `ICC_SGI1R_EL1` to raise SGI `sgi` (0 to 15) on the one CPU with this MPIDR: the CPU's
+/// Aff0 as a bit of the 16-bit target list (a CPU with Aff0 of 16 or more cannot be addressed this way: `None`),
+/// its Aff1 to Aff3 in their fields.
+pub fn sgi1r(mpidr: u64, sgi: u32) -> Option<u64> {
+    let (a0, a1, a2, a3) = (mpidr & 0xff, (mpidr >> 8) & 0xff, (mpidr >> 16) & 0xff, (mpidr >> 32) & 0xff);
+    if a0 >= 16 || sgi >= 16 {
+        return None;
+    }
+    Some((a3 << 48) | (a2 << 32) | ((sgi as u64) << 24) | (a1 << 16) | (1 << a0))
+}
+
+/// The frame among `frames` that belongs to the CPU with this affinity word (`mpidr_affinity`).
+pub fn find_redist(frames: &[Redist], affinity: u32) -> Option<Redist> {
+    frames.iter().copied().find(|f| f.affinity == affinity)
+}
+
+/// The desktop's size in its own pixels when `msm.desk=` did not say: the glass (`pw` x `ph`, the framebuffer's
+/// raster) halved, so that every desktop pixel is a 2 x 2 block of glass pixels and the 8 x 16 system font is
+/// still legible on a 440 ppi panel; a quarter turn swaps the sides (the desktop is then landscape on a portrait
+/// glass).
+pub fn desktop_size(pw: usize, ph: usize, rotate: crate::lcd::Rotation, desk: Option<(usize, usize)>) -> (usize, usize) {
+    if let Some(d) = desk {
+        return d;
+    }
+    let (w, h) = (pw / 2, ph / 2);
+    if rotate.landscape() { (h, w) } else { (w, h) }
 }
 
 // ---- what the display controller was told to scan out ------------------------------------
@@ -1005,5 +1156,80 @@ mod tests {
     fn mpidr_maps_to_the_redistributor_affinity() {
         assert_eq!(mpidr_affinity(0x8000_0101), 0x0000_0101);
         assert_eq!(mpidr_affinity(0x01_8000_0203), 0x0100_0203);
+    }
+
+    #[test]
+    fn new_options_parse() {
+        let (o, _, n) = Opts::parse(b"msm.stage=1 msm.logsecs=9 msm.desk=640x360 msm.rotate=90 msm.timer=phys msm.smp=1");
+        assert_eq!(n, 0);
+        assert_eq!((o.stage, o.logsecs, o.desk, o.smp), (1, 9, Some((640, 360)), true));
+        assert_eq!(o.rotate, crate::lcd::Rotation::Deg90);
+        assert_eq!(o.timer, TimerSel::Phys);
+        let d = Opts::default();
+        assert_eq!((d.stage, d.logsecs, d.desk, d.smp, d.timer), (2, 5, None, false, TimerSel::Auto));
+        assert_eq!(Opts::parse(b"msm.timer=virt").0.timer, TimerSel::Virt);
+        assert_eq!(Opts::parse(b"msm.timer=auto").0.timer, TimerSel::Auto);
+        let (o, _, n) = Opts::parse(b"msm.stage=3 msm.logsecs=-1 msm.desk=big msm.rotate=45 msm.timer=hyp msm.smp=2");
+        assert_eq!(n, 6);
+        assert_eq!(Opts::parse(b"msm.desk=2x2").2, 1);
+        assert_eq!(o, Opts::default());
+    }
+
+    #[test]
+    fn interrupt_specifiers_become_intids() {
+        assert_eq!(intid(1, 3), Some(19));
+        assert_eq!(intid(1, 11), Some(27));
+        assert_eq!(intid(0, 1), Some(33));
+        assert_eq!(intid(1, 16), None);
+        assert_eq!(intid(2, 0), None);
+        // The Pixel 2's stock tree: <1 1 0xf08  1 2 0xf08  1 3 0xf08  1 0 0xf08>.
+        let be = |v: &[u32]| v.iter().flat_map(|c| c.to_be_bytes()).collect::<Vec<u8>>();
+        let t = timer_intids(&be(&[1, 1, 0xf08, 1, 2, 0xf08, 1, 3, 0xf08, 1, 0, 0xf08]));
+        assert_eq!(t, TimerIntids { secure: Some(17), phys: Some(18), virt: Some(19), hyp: Some(16) });
+        // qemu virt's: <1 13 0x104  1 14 0x104  1 11 0x104  1 10 0x104>.
+        let t = timer_intids(&be(&[1, 13, 0x104, 1, 14, 0x104, 1, 11, 0x104, 1, 10, 0x104]));
+        assert_eq!((t.phys, t.virt), (Some(30), Some(27)));
+        // A short property: what is there is read, the rest is none.
+        let t = timer_intids(&be(&[1, 13, 0x104, 1, 14, 0x104]));
+        assert_eq!((t.secure, t.phys, t.virt, t.hyp), (Some(29), Some(30), None, None));
+        assert_eq!(timer_intids(&[]), TimerIntids::default());
+        assert_eq!(timer_intids(&[0, 0, 0]), TimerIntids::default());
+    }
+
+    #[test]
+    fn affinity_routing_and_sgi_values() {
+        // The little cores 0..3 are Aff1 0, the big cores 0x100..0x103 are Aff1 1.
+        assert_eq!(irouter(0x0), 0);
+        assert_eq!(irouter(0x8000_0101), 0x101);
+        assert_eq!(irouter(0x01_8000_0203), 0x1_0000_0203);
+        assert_eq!(sgi1r(0x0, 0), Some(1));
+        assert_eq!(sgi1r(0x3, 5), Some(5 << 24 | 1 << 3));
+        assert_eq!(sgi1r(0x102, 1), Some(1 << 24 | 1 << 16 | 1 << 2));
+        assert_eq!(sgi1r(0x02_0003_0201, 15), Some(2 << 48 | 3 << 32 | 15 << 24 | 2 << 16 | 1 << 1));
+        assert_eq!(sgi1r(0x10, 1), None);
+        assert_eq!(sgi1r(0x1, 16), None);
+    }
+
+    #[test]
+    fn the_cpus_redistributor_is_found_by_affinity() {
+        let frames: Vec<Redist> = [0u32, 1, 2, 3, 0x100, 0x101, 0x102, 0x103]
+            .iter()
+            .enumerate()
+            .map(|(i, &a)| Redist { offset: i * 0x2_0000, affinity: a, processor: i as u16, last: i == 7, vlpis: false })
+            .collect();
+        assert_eq!(find_redist(&frames, 0x102).map(|f| f.offset), Some(6 * 0x2_0000));
+        assert_eq!(find_redist(&frames, mpidr_affinity(0x8000_0000)).map(|f| f.offset), Some(0));
+        assert_eq!(find_redist(&frames, 0x200), None);
+        assert_eq!(find_redist(&[], 0), None);
+    }
+
+    #[test]
+    fn the_desktop_defaults_to_half_the_glass() {
+        use crate::lcd::Rotation::*;
+        assert_eq!(desktop_size(1080, 1920, Deg0, None), (540, 960));
+        assert_eq!(desktop_size(1080, 1920, Deg180, None), (540, 960));
+        assert_eq!(desktop_size(1080, 1920, Deg90, None), (960, 540));
+        assert_eq!(desktop_size(1080, 1920, Deg270, None), (960, 540));
+        assert_eq!(desktop_size(1080, 1920, Deg90, Some((640, 360))), (640, 360));
     }
 }

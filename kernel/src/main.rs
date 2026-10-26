@@ -25,6 +25,8 @@ mod fs;
 mod fwcfg;
 mod gfx;
 mod gic;
+#[cfg(feature = "msm8998")]
+mod gic3;
 mod heap;
 mod input;
 mod journal;
@@ -151,11 +153,31 @@ pub extern "C" fn kmain() -> ! {
         rpi::diag::dtb_report();
     }
     serror::checkpoint("boot-reports");
+    boot_rest()
+}
 
-    gic::init();
-    serror::checkpoint("gic-init");
-    timer::init();
-    serror::checkpoint("timer-init");
+/// Everything after the boot reports: interrupts, the timer, drivers, the file system, the scheduler, user space
+/// and the desktop. The Pixel 2 comes here from the end of its stage 1 (msm/stage1.rs), with memory set up and
+/// its boot log on the screen.
+pub fn boot_rest() -> ! {
+    #[cfg(feature = "msm8998")]
+    {
+        // The desktop's surface first (it needs memory, not interrupts); then the GIC and the timer, which on a
+        // phone can fail in ways only the screen tells (msm/irq.rs): that stays in stage 1, counting.
+        display::init();
+        serror::checkpoint("display-init");
+        if let Err(why) = msm::irq::init() {
+            msm::stage1::stay_in_stage1(why)
+        }
+        serror::checkpoint("gic-timer-init");
+    }
+    #[cfg(not(feature = "msm8998"))]
+    {
+        gic::init();
+        serror::checkpoint("gic-init");
+        timer::init();
+        serror::checkpoint("timer-init");
+    }
     uart::init();
     serror::checkpoint("uart-init");
     serror::measure();
@@ -189,6 +211,14 @@ pub extern "C" fn kmain() -> ! {
     serror::checkpoint("sched-init-entry");
     sched::init();
     serror::checkpoint("sched-init");
+    // The phone starts its other CPUs only when asked (msm.smp=1): until someone has watched it work there, one CPU.
+    #[cfg(feature = "msm8998")]
+    if msm::opts().smp {
+        smp::init();
+    } else {
+        kprintln!("[smp] one CPU (msm.smp=1 starts the others through PSCI)");
+    }
+    #[cfg(not(feature = "msm8998"))]
     smp::init();
     serror::checkpoint("smp-init");
     #[cfg(feature = "raspi")]
@@ -216,6 +246,9 @@ pub extern "C" fn kmain() -> ! {
     serror::checkpoint("audio-init");
     udrv::init_files();
     serror::checkpoint("udrv-init-files");
+    // The phone: the log stays on the screen for a while before user space can write to the same console.
+    #[cfg(feature = "msm8998")]
+    msm::stage1::hold_log();
     proc::init();
     serror::checkpoint("proc-init");
     proc::start_init();
@@ -246,12 +279,20 @@ pub extern "C" fn kmain() -> ! {
 
     // The desktop: compositor, window manager and shell, in its own thread. It owns the
     // screen and draws the mouse cursor from here on.
+    #[cfg(feature = "msm8998")]
+    sched::spawn_prio("wm", sched::Priority::High, msm::stage1::start_desktop);
+    #[cfg(not(feature = "msm8998"))]
     sched::spawn_prio("wm", sched::Priority::High, wm::run);
     // The boot is over: from here a kernel that stops kicking is a frozen one (rpi/watchdog.rs).
     #[cfg(feature = "raspi")]
     rpi::watchdog::arm();
     // kmain is now just thread 0.
     selftest::crash_if_asked("late");
+    // The phone: the counter under the boot log until the desktop takes the screen, the watchdog and the display
+    // kick if asked for, forever.
+    #[cfg(feature = "msm8998")]
+    msm::stage1::housekeeping();
+    #[cfg(not(feature = "msm8998"))]
     loop {
         sched::sleep_ms(1000);
     }

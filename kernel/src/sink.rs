@@ -61,6 +61,20 @@ fn try_lock() -> bool {
     try_lock_of(&SCREEN)
 }
 
+/// Take the screen-console flag, waiting for whoever has it. The holder may be a thread of lower priority that was
+/// preempted in the middle of a console write (the Pixel 2's boot thread paints the live counter once a second while the
+/// desktop thread, of high priority, starts and takes the screen over): a high priority thread that only spins would
+/// starve it for ever, so with the scheduler running and interrupts on, sleep a millisecond between tries.
+fn lock_blocking() {
+    while !try_lock() {
+        if crate::sched::started() && crate::sync::irqs_enabled() {
+            crate::sched::sleep_ms(1);
+        } else {
+            core::hint::spin_loop();
+        }
+    }
+}
+
 /// Owner (CPU index + 1) of the line lock that keeps `kprintln!` lines from different CPUs
 /// apart; 0 = free.
 static PRINT_OWNER: AtomicU32 = AtomicU32::new(0);
@@ -171,9 +185,7 @@ pub fn after_print() {
 
 /// From now on `kprintln!` output is mirrored on screen.
 pub fn install_screen(console: Console) {
-    while !try_lock() {
-        core::hint::spin_loop();
-    }
+    lock_blocking();
     // SAFETY: we hold the `busy` flag.
     unsafe { *SCREEN.inner.get() = Some(console) };
     SCREEN.busy.store(false, Ordering::Release);
@@ -189,9 +201,7 @@ pub fn paint(f: impl FnOnce(&mut Console)) {
 /// Stop mirroring to the screen (the desktop is about to own the framebuffer). The console's
 /// state is dropped; the text is still in the kernel log.
 pub fn remove_screen() {
-    while !try_lock() {
-        core::hint::spin_loop();
-    }
+    lock_blocking();
     // SAFETY: we hold the `busy` flag.
     unsafe { *SCREEN.inner.get() = None };
     SCREEN.busy.store(false, Ordering::Release);

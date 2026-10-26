@@ -186,6 +186,9 @@ pub fn overruns() -> u64 {
 /// Clear the RX / timeout / error interrupts, *then* move every byte in the FIFO into
 /// the ring (see the module docs for why that order). Returns how many bytes moved.
 fn drain() -> usize {
+    if crate::platform::NO_UART {
+        return 0; // the phone has no UART: address 0 is one of the SoC's registers
+    }
     let _g = DRAIN.lock();
     reg_write(UARTICR, INT_RX | INT_RT | INT_ERRORS);
     let mut n = 0;
@@ -208,6 +211,9 @@ fn on_irq(_irq: u32, _frame: &mut TrapFrame) {
 /// bytes anyway, count it and say so once. Returns true if it moved any bytes.
 pub fn poll() -> bool {
     const UARTMIS: usize = 0x40;
+    if crate::platform::NO_UART {
+        return false;
+    }
     if reg_read(UARTFR) & FR_RXFE != 0 || reg_read(UARTMIS) & (INT_RX | INT_RT) != 0 {
         return false; // nothing waiting, or the IRQ is on its way
     }
@@ -230,6 +236,9 @@ pub fn rescues() -> u64 {
 
 /// Hook up the RX interrupt. GIC must be initialised; IRQs still need unmasking.
 pub fn init() {
+    if crate::platform::NO_UART {
+        return;
+    }
     reg_write(UARTIMSC, 0); // quiet while we set up
     reg_write(UARTIFLS, 0); // RX FIFO trigger at 1/8 full; RT interrupt covers the rest
     reg_write(UARTICR, 0x7ff);

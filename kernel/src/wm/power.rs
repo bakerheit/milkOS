@@ -24,6 +24,12 @@ pub fn shut_down() {
     // Commit the filesystems first: the last second of writes and the newest search-index
     // save would otherwise be lost with the power.
     let _ = crate::fs::sync_all();
+    if crate::platform::PHONE {
+        // The hypervisor's answer to a PSCI call from this kernel is not known: the phone is turned off with its
+        // power button (hold it 10 to 15 seconds).
+        crate::kprintln!("wm: shutting down is not done on the Pixel 2 yet: hold the power button for 10 to 15 seconds");
+        return;
+    }
     #[cfg(feature = "raspi")]
     {
         crate::kprintln!("wm: shutting down (power manager, halt)");
@@ -40,6 +46,10 @@ pub fn shut_down() {
 
 pub fn restart() {
     let _ = crate::fs::sync_all();
+    if crate::platform::PHONE {
+        crate::kprintln!("wm: restarting is not done on the Pixel 2 yet: hold the power button for 10 to 15 seconds");
+        return;
+    }
     #[cfg(feature = "raspi")]
     {
         crate::kprintln!("wm: restarting (power manager, full reset)");

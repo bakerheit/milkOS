@@ -143,8 +143,9 @@ pub const MSM8998: Platform = Platform {
     // Only the GiB the kernel and the bootloader's tree are in: nothing else is touched before the
     // real tables exist (the protected carve-outs inside it are never touched either).
     boot_map: [Block::None, Block::None, Block::Ram, Block::None],
-    // Stage 1 uses the first 2 GiB of RAM (0x8000_0000..0x1_0000_0000).
-    ram_limit: 0x1_0000_0000,
+    // All of it: the tree lists 0x8000_0000..0x1_0000_0000 and a second range above 4 GiB (the phone has 4 GB).
+    // (Stage 1 stopped at 4 GiB, which left the second range unused.)
+    ram_limit: usize::MAX,
     dma_limit: usize::MAX,
     // The first bank below the first carve-out (0x8580_0000), less the kernel: right on a phone
     // whose tree is unreadable.
@@ -191,6 +192,14 @@ pub const RASPI: bool = cfg!(feature = "raspi");
 
 /// True on the Pixel 2 build (and its qemu test build).
 pub const MSM: bool = cfg!(feature = "msm8998");
+
+/// True on the real Pixel 2 build (not its qemu test build): there is no PL031 clock, no fw_cfg and no virtio, so the
+/// code that probes for them by address must not, because those addresses are the Snapdragon's own registers.
+pub const PHONE: bool = cfg!(feature = "msm8998") && !cfg!(feature = "msm-virt-test");
+
+/// Boot options come from the kernel command line (`milk.<name>=<value>`), not from fw_cfg files: the Pi, and the Pixel 2
+/// builds.
+pub const CMDLINE_OPTIONS: bool = RASPI || MSM;
 
 /// The screen is the only place a crash can be read (no serial cable): Raspberry Pi, Pixel 2.
 pub const SCREEN_ONLY: bool = RASPI || MSM;

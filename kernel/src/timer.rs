@@ -1,6 +1,7 @@
 //! ARM generic timer: monotonic clock, 100 Hz tick, busy delays and a one-shot deadline.
 //!
-//! Uses the EL1 *virtual* timer (CNTV_*), PPI 11 = INTID 27 on qemu virt. The task brief
+//! Uses the EL1 *virtual* timer (CNTV_*), PPI 11 = INTID 27 on qemu virt (the Pixel 2 reads its INTID from the
+//! tree and can use the physical timer instead: `select_msm`). The task brief
 //! asked for the physical timer (CNTP_*, PPI 14 = INTID 30), but under `-accel hvf` on Apple
 //! silicon the guest's CNTP_* system registers trap and qemu reflects them back as an
 //! "unknown reason" undefined-instruction exception (seen in testing: `msr cntv_cval_el0`
@@ -15,7 +16,7 @@
 #![allow(dead_code)]
 
 use core::arch::asm;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use core::time::Duration;
 
 use crate::exceptions::TrapFrame;
@@ -26,7 +27,16 @@ use crate::{gic, kprintln};
 /// Scheduler tick rate.
 pub const TICK_HZ: u64 = 100;
 /// EL1 virtual timer, PPI 11 in the device tree.
-pub const TIMER_IRQ: u32 = gic::ppi(11);
+const DEFAULT_IRQ: u32 = gic::ppi(11);
+/// The INTID of the timer in use (the Pixel 2's comes from its tree and is checked against the GIC).
+static IRQ: AtomicU32 = AtomicU32::new(DEFAULT_IRQ);
+/// Drive the non-secure physical timer (CNTP_*) instead of the virtual one. The counter stays the virtual one:
+/// the comparator value is converted (the hypervisor may have given CNTVOFF a value).
+static USE_PHYS: AtomicBool = AtomicBool::new(false);
+
+fn irq() -> u32 {
+    IRQ.load(Ordering::Relaxed)
+}
 
 const NO_DEADLINE: u64 = u64::MAX;
 
@@ -82,10 +92,22 @@ fn read_cntfrq() -> u64 {
 }
 
 fn set_cval(v: u64) {
+    if USE_PHYS.load(Ordering::Relaxed) {
+        // CNTP_CVAL is compared with CNTPCT, which is CNTVCT + CNTVOFF: move the target by the difference.
+        let p: u64;
+        unsafe { asm!("isb", "mrs {}, cntpct_el0", out(reg) p, options(nomem, nostack)) };
+        let v = p.wrapping_add(v.wrapping_sub(counter()));
+        unsafe { asm!("msr cntp_cval_el0, {}", "isb", in(reg) v, options(nomem, nostack)) };
+        return;
+    }
     unsafe { asm!("msr cntv_cval_el0, {}", "isb", in(reg) v, options(nomem, nostack)) };
 }
 
 fn set_ctl(v: u64) {
+    if USE_PHYS.load(Ordering::Relaxed) {
+        unsafe { asm!("msr cntp_ctl_el0, {}", "isb", in(reg) v, options(nomem, nostack)) };
+        return;
+    }
     unsafe { asm!("msr cntv_ctl_el0, {}", "isb", in(reg) v, options(nomem, nostack)) };
 }
 
@@ -269,19 +291,26 @@ pub fn init() {
         f = 54_000_000;
         kprintln!("[timer] CNTFRQ_EL0 is zero: assuming the Pi's 54 MHz");
     }
+    if f == 0 {
+        // The Pixel 2's init_polled assumed 19.2 MHz when the firmware said nothing.
+        f = FREQ.load(Ordering::Relaxed);
+    }
     assert!(f != 0, "CNTFRQ_EL0 is zero");
     FREQ.store(f, Ordering::Relaxed);
     let now = counter();
-    BOOT_COUNT.store(now, Ordering::Relaxed);
+    // The Pixel 2 started the clock earlier (init_polled): its uptime does not start over.
+    if BOOT_COUNT.load(Ordering::Relaxed) == 0 {
+        BOOT_COUNT.store(now, Ordering::Relaxed);
+    }
     let period = f / TICK_HZ;
     TICK_PERIOD.store(period, Ordering::Relaxed);
     next_tick().store(now + period, Ordering::Relaxed);
     deadline().store(NO_DEADLINE, Ordering::Relaxed);
 
-    gic::register(TIMER_IRQ, on_irq).expect("timer IRQ registration");
+    gic::register(irq(), on_irq).expect("timer IRQ registration");
     // Level-triggered PPI: ISTATUS stays asserted until the comparator is moved.
-    gic::set_edge_triggered(TIMER_IRQ, false).ok();
-    gic::enable(TIMER_IRQ).expect("timer IRQ enable");
+    gic::set_edge_triggered(irq(), false).ok();
+    gic::enable(irq()).expect("timer IRQ enable");
 
     let _g = IrqGuard::new();
     reprogram();
@@ -289,6 +318,106 @@ pub fn init() {
         "[timer] CNTFRQ {} Hz, tick {} Hz (INTID {})",
         f,
         TICK_HZ,
-        TIMER_IRQ
+        irq()
     );
+}
+
+/// What [`select_msm`] found out about one timer, for the log.
+#[cfg(feature = "msm8998")]
+#[derive(Clone, Copy)]
+pub struct Probe {
+    pub name: &'static str,
+    /// The INTID the tree names for it.
+    pub intid: u32,
+    /// The timer's own condition (`ISTATUS`) came true within the wait.
+    pub fired: bool,
+    /// The private interrupts that became pending in the GIC meanwhile (bit n = INTID n), none that were already.
+    pub pending: u32,
+}
+
+/// Which timer the Pixel 2's scheduler tick uses, decided by trying it: arm the comparator 1 ms ahead with the CPU's
+/// interrupts masked and see whether the GIC raises the INTID the tree names (or, if it raises exactly one other,
+/// which one). `want` is the order to try. The first timer that works is kept (its INTID and the choice of timer
+/// registers are set for [`init`]); `Err` has what was seen of each. The GIC must be up (`gic::init`).
+#[cfg(feature = "msm8998")]
+pub fn select_msm(
+    want: rpikit::msm::TimerSel,
+    tree: rpikit::msm::TimerIntids,
+    out: &mut [Option<Probe>; 2],
+) -> Option<(&'static str, u32)> {
+    use rpikit::msm::TimerSel;
+    let virt = (false, "virtual", tree.virt.unwrap_or(gic::ppi(11)));
+    let phys = (true, "physical", tree.phys.unwrap_or(gic::ppi(14)));
+    let order: &[(bool, &str, u32)] = match want {
+        TimerSel::Auto => &[virt, phys],
+        TimerSel::Virt => &[virt],
+        TimerSel::Phys => &[phys],
+    };
+    let f = FREQ.load(Ordering::Relaxed).max(1_000_000);
+    let spin = |ms: u64, done: &mut dyn FnMut() -> bool| -> bool {
+        let end = counter() + f / 1000 * ms;
+        loop {
+            if done() {
+                return true;
+            }
+            if counter() >= end {
+                return false;
+            }
+            core::hint::spin_loop();
+        }
+    };
+    for (i, &(is_phys, name, intid)) in order.iter().enumerate() {
+        USE_PHYS.store(is_phys, Ordering::Relaxed);
+        set_ctl(0);
+        let before = crate::gic3::pending_private();
+        set_cval(counter() + f / 1000);
+        set_ctl(1);
+        let status = |is_phys: bool| -> u64 {
+            let v: u64;
+            // SAFETY: register read.
+            unsafe {
+                if is_phys {
+                    asm!("mrs {}, cntp_ctl_el0", out(reg) v, options(nomem, nostack))
+                } else {
+                    asm!("mrs {}, cntv_ctl_el0", out(reg) v, options(nomem, nostack))
+                }
+            }
+            v
+        };
+        // 1 ms ahead is the aim; 100 ms is how long a loaded machine (qemu on a busy host) may take to fire it.
+        let fired = spin(100, &mut || status(is_phys) & 4 != 0);
+        // The GIC takes a moment to see the line.
+        spin(100, &mut || crate::gic3::pending_private() & !before != 0);
+        let pending = crate::gic3::pending_private() & !before;
+        // An interrupt that is pending proves the condition was met, whatever ISTATUS said when it was looked at.
+        let fired = fired || pending != 0;
+        set_ctl(0);
+        spin(5, &mut || crate::gic3::pending_private() & !before == 0);
+        for b in 16..32u32 {
+            if pending & (1 << b) != 0 {
+                crate::gic3::clear_pending(b);
+            }
+        }
+        if i < out.len() {
+            out[i] = Some(Probe { name, intid, fired, pending });
+        }
+        if fired && pending & (1 << intid) != 0 {
+            IRQ.store(intid, Ordering::Relaxed);
+            return Some((name, intid));
+        }
+        // The timer fired and exactly one other private interrupt came with it: that is its line.
+        if fired && pending.count_ones() == 1 && pending.trailing_zeros() >= 16 {
+            let other = pending.trailing_zeros();
+            IRQ.store(other, Ordering::Relaxed);
+            return Some((name, other));
+        }
+    }
+    USE_PHYS.store(false, Ordering::Relaxed);
+    None
+}
+
+/// Is the physical timer the tick source (`select_msm` chose it)?
+#[cfg(feature = "msm8998")]
+pub fn uses_phys() -> bool {
+    USE_PHYS.load(Ordering::Relaxed)
 }

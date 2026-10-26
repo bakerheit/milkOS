@@ -244,10 +244,13 @@ def minimal_tree(model=WALLEYE_MODEL, msm_id=WALLEYE_MSM_ID, bootargs=""):
     return write_fdt(r)
 
 
-def virt_test_tree(splash=(0x50000000, 0x2400000), reserved=((0x41000000, 0x100000), (0x42000000, 0x200000)), bootargs=""):
+def virt_test_tree(splash=(0x50000000, 0x2400000), reserved=((0x4C000000, 0x100000), (0x4D000000, 0x200000)), bootargs="",
+                   timer=(13, 14, 11, 10)):
     """A tree for the qemu `virt` test of the Pixel 2 code (scripts/pixel2-qemu-test.sh): qemu's
     addresses for the interrupt controller, RAM-sized reserved regions like the phone's (`no-map`,
-    with an address) and a splash region. qemu fills in `/memory` and `/chosen/bootargs` itself."""
+    with an address) and a splash region. qemu fills in `/memory` and `/chosen/bootargs` itself. `timer` is the PPI
+    numbers of the generic timer node (secure physical, physical, virtual, hypervisor; qemu's are 13, 14, 11, 10):
+    a wrong one tests that the kernel finds the right interrupt by trying the timer; None leaves the node out."""
     r = Node("")
     r.prop("#address-cells", cells(2)).prop("#size-cells", cells(2))
     r.prop("model", strs("milkOS Pixel 2 test tree")).prop("compatible", strs("linux,dummy-virt"))
@@ -274,6 +277,10 @@ def virt_test_tree(splash=(0x50000000, 0x2400000), reserved=((0x41000000, 0x1000
     soc.prop("#address-cells", cells(1)).prop("#size-cells", cells(1)).prop("ranges")
     wd = soc.child("qcom,wdt@a003e00")
     wd.prop("compatible", strs("qcom,msm-watchdog")).prop("reg", cells(0x0A003E00, 0x200))
+    if timer:
+        t = r.child("timer")
+        t.prop("compatible", strs("arm,armv8-timer"))
+        t.prop("interrupts", cells(*[x for n in timer for x in (1, n, 0x104)]))
     intc = r.child("intc@8000000")
     intc.prop("compatible", strs("arm,gic-v3")).prop("#interrupt-cells", cells(3)).prop("interrupt-controller")
     intc.prop("#address-cells", cells(2)).prop("#size-cells", cells(2))
@@ -334,6 +341,7 @@ def main(argv):
     v = sub.add_parser("virt-test")
     v.add_argument("-o", "--output", required=True)
     v.add_argument("--no-splash", action="store_true")
+    v.add_argument("--timer", help="the generic timer's four PPI numbers, comma separated (default 13,14,11,10); 'none' leaves the node out")
     a = ap.parse_args(argv)
     if a.cmd == "minimal":
         x, y = (int(v, 0) for v in a.msm_id.split(":"))
@@ -360,7 +368,15 @@ def main(argv):
                 f"custom {' '.join(f'{c:#x}' for c in e['custom'])}  ({e['size']} bytes at {e['offset']})"
             )
     elif a.cmd == "virt-test":
-        blob = virt_test_tree(splash=None if a.no_splash else (0x50000000, 0x2400000))
+        timer = (13, 14, 11, 10)
+        if a.timer == "none":
+            timer = None
+        elif a.timer:
+            timer = tuple(int(x) for x in a.timer.split(","))
+            if len(timer) != 4:
+                print("dtb_build: --timer wants four PPI numbers", file=sys.stderr)
+                return 1
+        blob = virt_test_tree(splash=None if a.no_splash else (0x50000000, 0x2400000), timer=timer)
         open(a.output, "wb").write(blob)
         print(f"dtb_build: {a.output} ({len(blob)} bytes, the qemu virt test tree)")
     elif a.cmd == "golden":

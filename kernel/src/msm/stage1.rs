@@ -1,4 +1,4 @@
-//! Stage 1 of the Pixel 2 port, in the order a person watching the phone sees it:
+//! Stages 1 and 2 of the Pixel 2 port, in the order a person watching the phone sees it:
 //!
 //! 1. the tree the bootloader handed over is read (no memory, no device touched) and the
 //!    framebuffer's place found; four labelled colour blocks, a white frame and two diagonals are
@@ -9,6 +9,12 @@
 //!    interrupt controller says (read only);
 //! 3. a counter that goes up once a second and a marker that sweeps across the green band at the
 //!    top, so a frozen phone is recognisable. The kernel polls the counter: no interrupt is enabled.
+//!    `msm.stage=1` stops here (the stage 1 behaviour); so does a failure of stage 2's first step, with its reason
+//!    on the screen ([`stay_in_stage1`]);
+//! 4. stage 2 (the default): the rest of the kernel (`main.rs`, `boot_rest`): interrupts and the timer
+//!    (`irq.rs`), the scheduler, the file system, user space, then, after `msm.logsecs=` seconds of the boot log
+//!    with the counter under it, the desktop ([`start_desktop`]) with its clock. [`housekeeping`] keeps the
+//!    counter, the watchdog and the display kick going from the boot thread.
 //!
 //! Nothing here powers the phone off, resets it or writes to storage. The only calls to the secure
 //! world are the optional `msm.psci=1` PSCI_VERSION, and the display controller is only written to
@@ -17,6 +23,7 @@
 use core::fmt::Write as _;
 
 use crate::dtb::{Cpu, Dtb, MAX_CPUS};
+use crate::sync::SpinLock;
 use crate::{fbcon::Console, kprintln, mem, mmu, platform, sink, timer, VERSION};
 use rpikit::msm::{CrashTest, Hold, Opts};
 
@@ -167,6 +174,8 @@ pub fn run() -> ! {
     // 2. Memory, then the rest.
     crate::percpu::init_boot();
     mem::init();
+    crate::msm::set_opts(opts);
+    crate::serror::init();
     #[cfg(feature = "msm-virt-test")]
     if !crate::msm::fb::ready() {
         // qemu has no splash region: ramfb, 1080x1920 like the phone.
@@ -226,7 +235,95 @@ pub fn run() -> ! {
         }
         _ => {}
     }
-    idle(dtb.as_ref(), &opts, console_rows, chores)
+    *STATE.lock() = Some((console_rows, chores));
+    if opts.stage == 1 {
+        idle(dtb.as_ref(), &opts, console_rows, chores)
+    }
+    kprintln!("stage 2: interrupts and the timer, the scheduler, user space, then the desktop");
+    crate::boot_rest()
+}
+
+/// What the loops that go on after the log need: the console's last row and the chores.
+static STATE: SpinLock<Option<(usize, Chores)>> = SpinLock::new(None);
+
+/// Stage 2 could not go on: say why on the screen and stay in the stage 1 idle loop (no interrupts), counting, so a
+/// photograph shows both the reason and that the machine is alive.
+pub fn stay_in_stage1(why: &str) -> ! {
+    kprintln!("");
+    kprintln!("stage 2 STOPPED: {why}");
+    kprintln!("staying in stage 1: no interrupts, counting. Photograph this screen.");
+    let (rows, chores) = (*STATE.lock()).unwrap_or((
+        24,
+        Chores { wdt: None, kick: None, freq: timer::frequency().max(1) },
+    ));
+    // SAFETY: the bootloader's pointer, or 0.
+    let dtb = unsafe { Dtb::from_addr(mem::boot_dtb_ptr()) };
+    let mut opts = crate::msm::opts();
+    opts.mdp_dump = false;
+    idle(dtb.as_ref(), &opts, rows, chores)
+}
+
+/// Stage 2's pause, right before user space starts: the boot log (the kernel up to here) stays on the screen for
+/// `msm.logsecs=` seconds with the counter under it, so a photograph can be taken of what the kernel did before user
+/// programs start writing to the same console (a program may clear it). The scheduler and the timer work by now.
+pub fn hold_log() {
+    let secs = crate::msm::opts().logsecs;
+    let (rows, chores) = (*STATE.lock()).unwrap_or((
+        24,
+        Chores { wdt: None, kick: None, freq: timer::frequency().max(1) },
+    ));
+    // Keep the last row free for the counter.
+    for _ in 0..2 {
+        kprintln!("");
+    }
+    kprintln!("stage 2: the log stays up for {secs} s (msm.logsecs=), then user space and the desktop");
+    for s in 0..secs as u64 {
+        if let Some(b) = chores.wdt {
+            crate::msm::wdt::pet(b);
+        }
+        update(s, rows);
+        if let Some(base) = chores.kick {
+            for _ in 0..10 {
+                crate::msm::fb::kick(base);
+                crate::sched::sleep_ms(100);
+            }
+        } else {
+            crate::sched::sleep_ms(1000);
+        }
+    }
+}
+
+/// The "wm" thread of the phone: the desktop takes the screen.
+pub fn start_desktop() {
+    kprintln!("desktop: starting at {} s", timer::now_ns() / 1_000_000_000);
+    crate::wm::run();
+}
+
+/// The boot thread's last job: once a second the counter on the log's last row and the marker on the band (until
+/// the desktop takes the screen), the watchdog if asked to, the display controller kick ten times a second if asked
+/// to. Never returns.
+pub fn housekeeping() -> ! {
+    let (rows, chores) = (*STATE.lock()).unwrap_or((
+        24,
+        Chores { wdt: None, kick: None, freq: timer::frequency().max(1) },
+    ));
+    let freq = chores.freq;
+    let mut next = timer::counter();
+    let mut secs: u64 = crate::msm::opts().logsecs as u64;
+    loop {
+        if let Some(base) = chores.kick {
+            crate::msm::fb::kick(base);
+        }
+        if timer::counter() >= next {
+            if let Some(b) = chores.wdt {
+                crate::msm::wdt::pet(b);
+            }
+            update(secs, rows);
+            secs += 1;
+            next += freq;
+        }
+        crate::sched::sleep_ms(if chores.kick.is_some() { 100 } else { 250 });
+    }
 }
 
 /// The line in the log (and on the console, which replays it) that says the pattern was drawn and how.
@@ -252,7 +349,10 @@ fn report(
     freq: u64,
 ) {
     kprintln!("milkOS {VERSION}: {}", platform::CURRENT.name);
-    kprintln!("stage 1: a screen and a log, no UART, no storage");
+    kprintln!(
+        "stage {}: a screen and a log, no UART, no storage yet",
+        crate::msm::opts().stage
+    );
     let (midr, mpidr) = midr_mpidr();
     kprintln!(
         "cpu: EL{} at entry, MIDR {midr:#x}, MPIDR {:#x}",

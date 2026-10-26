@@ -68,35 +68,10 @@ fn main() {
     println!("cargo:rustc-env=MILKOS_GIT={git_id}");
     println!("cargo:rerun-if-changed={}", repo.join("VERSION").display());
     println!("cargo:rerun-if-env-changed=MILKOS_RELEASE");
-    if std::env::var_os("CARGO_FEATURE_MSM8998").is_some() {
-        // The Pixel 2's stage 1 runs no user programs and draws no art: an empty initramfs and
-        // no icon tables keep the image small (the bootloader loads all of it into RAM).
-        empty_initramfs_and_art();
-        return;
-    }
     // User programs first: the initramfs packs them (initramfs.list).
     build_user(repo);
     build_initramfs(repo, &version);
     build_art(repo);
-}
-
-/// The initramfs with only its trailer, and the art tables empty (as `build_art` leaves them when
-/// python3 is missing): for the Pixel 2 image.
-fn empty_initramfs_and_art() {
-    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    let mut cpio = Cpio {
-        out: Vec::new(),
-        ino: 0,
-    };
-    cpio.entry("TRAILER!!!", 0, &[]);
-    fs::write(out.join("initramfs.cpio"), &cpio.out).expect("initramfs: write archive");
-    let art = out.join("art");
-    fs::create_dir_all(&art).unwrap();
-    fs::write(
-        art.join("art.rs"),
-        "pub static ICONS: &[IconArt] = &[];\npub static IMAGES: &[ImageArt] = &[];\n",
-    )
-    .unwrap();
 }
 
 // ---- art ------------------------------------------------------------------------------

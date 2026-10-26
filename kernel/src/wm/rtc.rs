@@ -12,8 +12,13 @@ const PL031_DR: usize = crate::mmu::phys_to_virt(0x0901_0000);
 static BASE: AtomicU64 = AtomicU64::new(0);
 
 pub fn init() {
-    // SAFETY: PL031 data register on qemu virt; device memory is identity-mapped.
-    let now = unsafe { core::ptr::read_volatile(PL031_DR as *const u32) } as u64;
+    // The Pixel 2 has no PL031: that address is one of the SoC's own registers.
+    let now = if crate::platform::PHONE {
+        0
+    } else {
+        // SAFETY: PL031 data register on qemu virt; device memory is identity-mapped.
+        unsafe { core::ptr::read_volatile(PL031_DR as *const u32) as u64 }
+    };
     let up = timer::now_ns() / 1_000_000_000;
     let base = if now > 1_600_000_000 {
         now - up

@@ -27,6 +27,9 @@ const PL031_PERIPH_ID0: usize = PL031_DR + 0xfe0;
 static BOOT_EPOCH: AtomicU64 = AtomicU64::new(0);
 
 pub fn init() {
+    if crate::platform::PHONE {
+        return; // no PL031 on the phone: that address is a register of the SoC
+    }
     // SAFETY: device memory, identity-mapped (0..1 GiB is Device-nGnRE).
     let id0 = unsafe { read_volatile(PL031_PERIPH_ID0 as *const u32) } & 0xff;
     if id0 != 0x31 {

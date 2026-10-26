@@ -123,6 +123,18 @@ class Fdt(unittest.TestCase):
         with self.assertRaises(ValueError):
             db.parse_fdt(bytes(bad))
 
+    def test_the_qemu_test_tree_has_a_gic_and_a_timer_with_the_ppis_asked_for(self):
+        _, _, nodes = db.parse_fdt(db.virt_test_tree())
+        t = nodes["/timer"]
+        self.assertEqual(struct.unpack(">12I", t["interrupts"]), (1, 13, 0x104, 1, 14, 0x104, 1, 11, 0x104, 1, 10, 0x104))
+        self.assertIn(b"arm,armv8-timer", t["compatible"])
+        self.assertIn(b"arm,gic-v3", nodes["/intc@8000000"]["compatible"])
+        # A wrong virtual timer interrupt (the kernel has to find the right one by trying), or no node at all.
+        _, _, nodes = db.parse_fdt(db.virt_test_tree(timer=(13, 14, 3, 10)))
+        self.assertEqual(struct.unpack(">12I", nodes["/timer"]["interrupts"])[7], 3)
+        _, _, nodes = db.parse_fdt(db.virt_test_tree(timer=None))
+        self.assertNotIn("/timer", nodes)
+
     def test_dtbo_table(self):
         # A made-up table of two entries in the format of the dtbo partition.
         hdr = struct.pack(">8I", db.DTBO_MAGIC, 200, 32, 32, 2, 32, 2048, 0)
@@ -293,6 +305,232 @@ class Build(unittest.TestCase):
     def test_arm64_header_is_read(self):
         self.assertEqual(ab.arm64_header(fake_image(0x4000, 0x80000)), (0x80000, 0x4000, 0xA))
         self.assertIsNone(ab.arm64_header(b"\0" * 100))
+
+
+class BuildScript(unittest.TestCase):
+    """scripts/android-build.sh with a made-up Image (--image: no cargo): the gzip image is the default, the plain
+    one is a variant, every variant is gzip, the README says what the phone showed."""
+
+    @classmethod
+    def setUpClass(cls):
+        import subprocess
+        import zlib
+        cls.zlib = zlib
+        cls.tmp = tempfile.TemporaryDirectory()
+        t = cls.tmp.name
+        cls.image = fake_image(0x5000, 0x80000, 0x2345)
+        cls.stock = db.minimal_tree()
+        open(os.path.join(t, "fake-image"), "wb").write(cls.image)
+        open(os.path.join(t, "stock-base.dtb"), "wb").write(cls.stock)
+        cls.out = os.path.join(t, "out")
+        r = subprocess.run(
+            ["bash", os.path.join(HERE, "android-build.sh"), cls.out, "--image", os.path.join(t, "fake-image"),
+             "--stock-dtb", os.path.join(t, "stock-base.dtb")],
+            capture_output=True, text=True, timeout=120,
+        )
+        cls.result = r
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def kernel_of(self, name):
+        b = open(os.path.join(self.out, name), "rb").read()
+        f = ab.unpack_header(b)
+        lay = ab.layout(f)
+        return f, b[lay["kernel"] : lay["kernel"] + f["kernel_size"]]
+
+    def test_the_build_worked(self):
+        self.assertEqual(self.result.returncode, 0, self.result.stderr + self.result.stdout)
+        self.assertTrue(os.path.exists(os.path.join(self.out, "README.txt")))
+
+    def test_the_default_image_is_the_gzip_one_with_the_stock_tree(self):
+        f, k = self.kernel_of("milkos-pixel2.img")
+        self.assertEqual(k[:2], b"\x1f\x8b")
+        d = self.zlib.decompressobj(31)
+        self.assertEqual(d.decompress(k), self.image)
+        self.assertEqual(d.unused_data, self.stock)
+        self.assertEqual(f["cmdline"].decode(), ab.STOCK_CMDLINE)
+
+    def test_the_plain_image_is_only_a_variant(self):
+        f, k = self.kernel_of("milkos-pixel2-plain.img")
+        self.assertEqual(k[: len(self.image)], self.image)
+        self.assertNotEqual(k[:2], b"\x1f\x8b")
+        self.assertEqual(f["cmdline"].decode(), ab.STOCK_CMDLINE)
+
+    def test_every_variant_is_gzip_and_adds_its_option(self):
+        want = {
+            "stage1": "msm.stage=1", "log30": "msm.logsecs=30", "smp": "msm.smp=1", "turn": "msm.rotate=90",
+            "phystimer": "msm.timer=phys", "desk720": "msm.desk=720x1280", "pattern": "msm.hold=inf", "rgbx": "msm.fmt=rgbx", "xrgb": "msm.fmt=xrgb",
+            "xbgr": "msm.fmt=xbgr", "kick": "msm.kick=ctl0 msm.hold=3", "mdp": "msm.mdp=dump msm.hold=3",
+            "wdt": "msm.wdt=pet",
+        }
+        for name, opt in want.items():
+            f, k = self.kernel_of(f"milkos-pixel2-{name}.img")
+            self.assertEqual(k[:2], b"\x1f\x8b", name)
+            self.assertTrue(f["cmdline"].decode().endswith(" " + opt), (name, f["cmdline"]))
+        # The old name of the gzip variant is gone: the default is that now.
+        self.assertFalse(os.path.exists(os.path.join(self.out, "milkos-pixel2-gz.img")))
+
+    def test_the_minimal_tree_variant_is_gzip_with_the_small_tree(self):
+        f, k = self.kernel_of("milkos-pixel2-minimal.img")
+        d = self.zlib.decompressobj(31)
+        self.assertEqual(d.decompress(k), self.image)
+        self.assertEqual(d.unused_data, db.minimal_tree())
+
+    def test_unpack_reads_into_the_gzip_stream(self):
+        import contextlib
+        import io
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertEqual(ab.main(["--unpack", os.path.join(self.out, "milkos-pixel2.img")]), 0)
+        text = buf.getvalue()
+        self.assertIn("(gzip)", text)
+        self.assertIn(f"{len(self.image)} bytes uncompressed, {len(self.stock)} bytes after it", text)
+        self.assertIn("arm64 Image   text_offset 0x80000, image_size 0x5000", text)
+
+    def test_the_readme_says_what_the_phone_showed(self):
+        t = open(os.path.join(self.out, "README.txt")).read()
+        for needle in ("FIRST boot", "Load Error", "STILL ANSWERS", "no longer answers", "android-try.sh",
+                       "GZIP", "10 to 15 seconds", "adb reboot bootloader", "fastboot reboot bootloader",
+                       "milkos-pixel2-plain.img", "milkos-pixel2-minimal.img", "second boot"):
+            self.assertIn(needle, t)
+
+
+class TryScript(unittest.TestCase):
+    """scripts/android-try.sh against stand-ins for adb and fastboot: a phone that jumps, one that stays in the
+    bootloader, one that refuses a second boot in a session, and no phone at all."""
+
+    STUB_FASTBOOT = r"""#!/bin/bash
+D="$STUB_DIR"
+echo "$@" >> "$D/fastboot.calls"
+case "$1" in
+  devices) [ -f "$D/present" ] && printf 'FAKE123\tfastboot\n'; exit 0 ;;
+  getvar)
+    if [ -f "$D/present" ]; then
+      if [ "$2" = unlocked ]; then echo "unlocked: yes" >&2; else echo "$2: walleye" >&2; fi
+      exit 0
+    fi
+    exec sleep 30 ;;
+  reboot) rm -f "$D/used"; echo "rebooting into bootloader" >&2; exit 0 ;;
+  boot)
+    if [ -f "$D/used" ]; then
+      echo "Sending 'boot.img' (1 KB) OKAY" >&2
+      echo "FAILED (remote: 'Failed to load/authenticate boot image: Load Error')" >&2
+      exit 1
+    fi
+    touch "$D/used"
+    echo "Sending 'boot.img' (1 KB) OKAY [ 0.1s]" >&2
+    echo "Booting OKAY [ 0.0s]" >&2
+    if [ "$STUB_MODE" = jump ]; then rm -f "$D/present"; fi
+    exit 0 ;;
+esac
+exit 1
+"""
+    STUB_ADB = r"""#!/bin/bash
+D="$STUB_DIR"
+echo "$@" >> "$D/adb.calls"
+case "$1" in
+  get-state) if [ -f "$D/android" ]; then echo device; exit 0; else echo "error: no devices/emulators found" >&2; exit 1; fi ;;
+  reboot) rm -f "$D/android" "$D/used"; touch "$D/present"; exit 0 ;;
+esac
+exit 1
+"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        t = self.tmp.name
+        self.stub = os.path.join(t, "stub")
+        os.makedirs(self.stub)
+        for name, body in (("fastboot", self.STUB_FASTBOOT), ("adb", self.STUB_ADB)):
+            p = os.path.join(t, name)
+            open(p, "w").write(body)
+            os.chmod(p, 0o755)
+        self.img = os.path.join(t, "good.img")
+        open(self.img, "wb").write(b"")
+        # A real (tiny) boot image from the builder.
+        k = os.path.join(t, "Image")
+        open(k, "wb").write(fake_image())
+        ab.main(["--kernel", k, "--dtb", self._dtb(t), "-o", self.img, "--compress", "gzip"])
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _dtb(self, t):
+        p = os.path.join(t, "x.dtb")
+        open(p, "wb").write(db.small_tree())
+        return p
+
+    def run_try(self, *args, mode="jump", phone="android", img=None):
+        import subprocess
+        t = self.tmp.name
+        for f in ("present", "android", "used"):
+            try:
+                os.remove(os.path.join(self.stub, f))
+            except FileNotFoundError:
+                pass
+        if phone == "android":
+            open(os.path.join(self.stub, "android"), "w").close()
+        elif phone == "bootloader":
+            open(os.path.join(self.stub, "present"), "w").close()
+        elif phone == "used":
+            open(os.path.join(self.stub, "present"), "w").close()
+            open(os.path.join(self.stub, "used"), "w").close()
+        env = dict(os.environ, STUB_DIR=self.stub, STUB_MODE=mode, ADB=os.path.join(t, "adb"),
+                   FASTBOOT=os.path.join(t, "fastboot"), ANDROID_TRY_SETTLE="0", ANDROID_TRY_POLLS="2",
+                   ANDROID_TRY_TICK="0.2", ANDROID_TRY_ASK="1")
+        r = subprocess.run(["bash", os.path.join(HERE, "android-try.sh"), "--yes", "--wait", "1", *args, img or self.img],
+                           capture_output=True, text=True, env=env, timeout=60, stdin=subprocess.DEVNULL)
+        return r
+
+    def calls(self, name):
+        try:
+            return open(os.path.join(self.stub, name)).read().splitlines()
+        except FileNotFoundError:
+            return []
+
+    def test_from_android_a_jump_is_reported_as_a_jump(self):
+        r = self.run_try(mode="jump", phone="android")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("JUMPED", r.stdout)
+        self.assertIn("reboot bootloader", self.calls("adb.calls"))
+        self.assertTrue(any(c.startswith("boot ") for c in self.calls("fastboot.calls")))
+
+    def test_a_bootloader_that_still_answers_means_not_started(self):
+        r = self.run_try(mode="stay", phone="bootloader")
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("STILL ANSWERS", r.stdout)
+        # In fastboot already: a fresh session by `fastboot reboot bootloader`, not adb.
+        self.assertIn("reboot bootloader", self.calls("fastboot.calls"))
+        self.assertEqual(self.calls("adb.calls"), [])
+
+    def test_a_second_boot_in_a_session_is_refused_and_explained(self):
+        r = self.run_try("--no-reboot", mode="jump", phone="used")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("REFUSED", r.stdout)
+        self.assertIn("Load Error", r.stdout)
+        # The same state with the default (a reboot first) works: every try starts in a fresh session.
+        r = self.run_try(mode="jump", phone="used")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("JUMPED", r.stdout)
+
+    def test_no_phone_is_reported(self):
+        r = self.run_try(mode="jump", phone="none")
+        self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
+        self.assertIn("no phone found", r.stderr)
+        r = self.run_try("--no-reboot", mode="jump", phone="none")
+        self.assertEqual(r.returncode, 4)
+        self.assertFalse(any(c.startswith("boot ") for c in self.calls("fastboot.calls")))
+
+    def test_a_file_that_is_not_a_boot_image_is_refused_before_anything_is_run(self):
+        bad = os.path.join(self.tmp.name, "bad.img")
+        open(bad, "wb").write(b"not an android boot image" * 100)
+        r = self.run_try(mode="jump", phone="android", img=bad)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("not an Android boot image", r.stderr)
+        self.assertEqual(self.calls("adb.calls"), [])
+        self.assertEqual(self.calls("fastboot.calls"), [])
 
 
 @unittest.skipUnless(os.environ.get("MILK_PIXEL2_STOCK"), "no stock images given")

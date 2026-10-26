@@ -2,17 +2,17 @@
 """Build and take apart Android boot images, header version 0 (what the Pixel 2's bootloader
 reads for `fastboot boot`).
 
-  Build:   python3 -I scripts/android-bootimg.py --kernel Image --dtb walleye.dtb -o milkos-pixel2.img
+  Build:   python3 -I scripts/android-bootimg.py --kernel Image --dtb walleye.dtb --compress gzip -o milkos-pixel2.img
   Unpack:  python3 -I scripts/android-bootimg.py --unpack boot.img [--out DIR]
 
 Build puts the kernel and the device tree into one "kernel" section of the image the way the
-phone's own `Image.lz4-dtb` does: the tree appended to the kernel. For an uncompressed arm64
-`Image` the bootloader finds the tree after the end of the image as the Image header's `image_size`
-field says (that field counts the zeroed memory after the file, .bss and the boot stack, so the
-tree goes at that offset and the bytes in between are zero); `--dtb-at end` puts it right after
-the file instead. `--compress gzip` is the other layout the bootloader knows from `Image.gz-dtb` (the
-Image gzip-compressed, the tree right after the compressed stream), for the case that it refuses a
-plain Image. The command line defaults to the stock Pixel 2 one; `--cmdline` replaces it
+phone's own `Image.lz4-dtb` does: the tree appended to the kernel. `--compress gzip` is the layout the
+real phone's bootloader STARTS: the Image gzip-compressed, the tree right after the compressed stream
+(`Image.gz-dtb`). Without it the kernel is the plain, uncompressed arm64 `Image`: the bootloader accepts
+that ("Booting OKAY") but does not start it. For a plain Image the bootloader finds the tree after the
+end of the image as the Image header's `image_size` field says (that field counts the zeroed memory after
+the file, .bss and the boot stack, so the tree goes at that offset and the bytes in between are zero);
+`--dtb-at end` puts it right after the file instead. The command line defaults to the stock Pixel 2 one; `--cmdline` replaces it
 and `--add-cmdline` appends to it (kernel options of ours look like `msm.fmt=rgbx`). The
 ramdisk is none (`--ramdisk none`), a tiny empty cpio archive (`tiny`, the default: the bootloader
 sees an ordinary image with a ramdisk) or a file.
@@ -249,6 +249,16 @@ def unpack(args):
     print(f"  id            {f['id'][:20].hex()} ({'matches' if want == f['id'] else 'does NOT match'} the sha1 of the contents)")
     print(f"  kernel starts {kernel[:8].hex()}" + ("  (LZ4 frame)" if kernel[:4] == b"\x04\x22\x4d\x18" else "  (gzip)" if kernel[:2] == b"\x1f\x8b" else ""))
     h = arm64_header(kernel)
+    if kernel[:2] == b"\x1f\x8b":
+        import zlib
+
+        try:
+            d = zlib.decompressobj(31)
+            raw = d.decompress(kernel)
+            print(f"  gzip stream   {len(kernel) - len(d.unused_data)} bytes, {len(raw)} bytes uncompressed, {len(d.unused_data)} bytes after it")
+            h = arm64_header(raw)
+        except zlib.error as e:
+            print(f"  gzip stream   BROKEN: {e}")
     if h:
         print(f"  arm64 Image   text_offset {h[0]:#x}, image_size {h[1]:#x}, flags {h[2]:#x}")
     at = 0
